@@ -153,7 +153,7 @@ describe('End-to-end dispatch', () => {
     cliWs.close();
   });
 
-  it('returns error when agent is busy', async () => {
+  it('queues task when agent is at capacity', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();
 
@@ -181,14 +181,15 @@ describe('End-to-end dispatch', () => {
       agentName: 'busy-agent',
       prompt: 'task 1',
     });
-    expect((first.payload as any).data.taskId).toBeDefined();
+    expect((first.payload as any).data.status).toBe('dispatched');
 
-    // Second dispatch fails — agent is busy
+    // Second dispatch is queued (not rejected)
     const second = await sendRequest(cliWs, 'dispatch-task', {
       agentName: 'busy-agent',
       prompt: 'task 2',
     });
-    expect((second.payload as any).error).toContain('capacity');
+    expect((second.payload as any).data.status).toBe('queued');
+    expect((second.payload as any).data.taskId).toBeDefined();
 
     agentWs.close();
     cliWs.close();

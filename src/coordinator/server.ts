@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { AgentRegistry } from './registry.js';
 import { logger } from '../shared/logger.js';
-import { TaskTracker, type TaskStatus } from './tasks.js';
+import { TaskTracker, type TaskStore, type TaskStatus } from './tasks.js';
+import { InMemoryTaskQueue, type TaskQueue } from './queue.js';
 import { validateToken, validateAgentToken } from '../shared/auth.js';
 import {
   parseMessage,
@@ -29,13 +30,15 @@ export interface CoordinatorOptions {
     key: string;
   };
   agentTokens?: Record<string, string>;
+  store?: TaskStore;
+  queue?: TaskQueue;
 }
 
 export class Coordinator {
   private wss: WebSocketServer | null = null;
   private httpsServer: HttpsServer | null = null;
   private registry = new AgentRegistry();
-  private tasks = new TaskTracker();
+  private tasks: TaskStore;
   private agentSockets = new Map<string, WebSocket>();
   private cliSockets = new Set<WebSocket>();
   private taskSubscribers = new Map<string, Set<WebSocket>>();
@@ -44,10 +47,13 @@ export class Coordinator {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private dedup = new MessageDeduplicator();
   private taskOwners = new Map<string, WebSocket>();
+  private queue: TaskQueue;
   private options: CoordinatorOptions;
 
   constructor(options: CoordinatorOptions) {
     this.options = options;
+    this.tasks = options.store ?? new TaskTracker();
+    this.queue = options.queue ?? new InMemoryTaskQueue();
   }
 
   async start(): Promise<void> {
@@ -239,6 +245,7 @@ export class Coordinator {
           this.agentSockets.set(requestedName, ws);
           agentName = requestedName;
           logger.info({ agent: agentName, os: msg.payload.os, arch: msg.payload.arch }, 'Agent registered');
+          this.processQueue(requestedName);
           break;
         }
         case 'agent:heartbeat': {
@@ -277,6 +284,7 @@ export class Coordinator {
           this.tasks.setCompleted(taskId);
           if (agentName) {
             this.registry.removeTask(agentName, taskId);
+            this.processQueue(agentName);
           }
           const subs = this.taskSubscribers.get(taskId);
           if (subs) {
@@ -298,6 +306,7 @@ export class Coordinator {
           this.tasks.setError(taskId, error);
           if (agentName) {
             this.registry.removeTask(agentName, taskId);
+            this.processQueue(agentName);
           }
           const errSubs = this.taskSubscribers.get(taskId);
           if (errSubs) {
@@ -371,6 +380,35 @@ export class Coordinator {
     });
   }
 
+  private processQueue(agentName: string): void {
+    while (this.registry.hasCapacity(agentName)) {
+      const taskId = this.queue.dequeue(agentName);
+      if (!taskId) break;
+
+      const task = this.tasks.get(taskId);
+      if (!task || task.status !== 'pending') continue;
+
+      if (!this.registry.tryAddTask(agentName, taskId)) break;
+
+      this.tasks.setRunning(taskId);
+      logger.info({ agent: agentName, taskId, traceId: task.traceId }, 'Queued task dispatched');
+
+      const agentWs = this.agentSockets.get(agentName);
+      if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+        agentWs.send(serializeMessage(createTaskDispatch({
+          taskId,
+          prompt: task.prompt,
+          sessionId: task.sessionId,
+          traceId: task.traceId,
+        })));
+      } else {
+        logger.error({ agent: agentName, taskId }, 'Agent socket not open for queued dispatch');
+        this.tasks.setError(taskId, 'Agent socket not open at dispatch time');
+        this.registry.removeTask(agentName, taskId);
+      }
+    }
+  }
+
   private sendError(ws: WebSocket, requestId: string, error: string): void {
     ws.send(serializeMessage(createCliResponse({ requestId, data: null, error })));
   }
@@ -433,19 +471,26 @@ export class Coordinator {
         const rawBudget = args?.maxBudgetUsd;
         const maxBudgetUsd = (typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 && rawBudget <= 10000) ? rawBudget : undefined;
         const task = this.tasks.create({ agentName, prompt, sessionId, traceId });
-        this.tasks.setRunning(task.id);
-        if (!this.registry.tryAddTask(agentName, task.id)) {
-          this.tasks.setError(task.id, 'Agent at capacity');
-          this.sendError(ws, requestId, `Agent "${agentName}" is at capacity (${agent.currentTaskIds.length}/${agent.maxConcurrent} tasks)`);
-          return;
-        }
         this.taskOwners.set(task.id, ws);
-        logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
 
         if (!this.taskSubscribers.has(task.id)) {
           this.taskSubscribers.set(task.id, new Set());
         }
         this.taskSubscribers.get(task.id)!.add(ws);
+
+        // Try immediate dispatch; if at capacity, queue the task
+        if (!this.registry.tryAddTask(agentName, task.id)) {
+          this.queue.enqueue(task.id, agentName);
+          logger.info({ agent: agentName, taskId: task.id, traceId, queueDepth: this.queue.depth() }, 'Task queued');
+          ws.send(serializeMessage(createCliResponse({
+            requestId,
+            data: { taskId: task.id, status: 'queued', queueDepth: this.queue.depth() },
+          })));
+          break;
+        }
+
+        this.tasks.setRunning(task.id);
+        logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
 
         const agentWs = this.agentSockets.get(agentName);
         if (agentWs && agentWs.readyState === WebSocket.OPEN) {

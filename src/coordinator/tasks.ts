@@ -16,7 +16,18 @@ export interface Task {
   completedAt?: number;
 }
 
-export class TaskTracker {
+export interface TaskStore {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string }): Task;
+  get(id: string): Task | null;
+  list(status?: TaskStatus): Task[];
+  setRunning(id: string): void;
+  appendOutput(id: string, data: string): boolean;
+  setCompleted(id: string): void;
+  setError(id: string, error: string): void;
+  cleanup(maxAgeMs: number): number;
+}
+
+export class TaskTracker implements TaskStore {
   private tasks = new Map<string, Task>();
   private maxOutputLines: number;
 

@@ -17,7 +17,7 @@
 | Phase 3 (Agent health) | COMPLETE | 68 → 73 |
 | Phase 4 (Per-agent concurrency) | COMPLETE | 73 → 81 |
 | Phase 4.5 (Remediation) | COMPLETE | 81 → 84 |
-| Phase 5 (SQLite + task queue) | TODO (depends on 4) | — |
+| Phase 5 (SQLite + task queue) | COMPLETE | 84 → 105 |
 | Phase 6 (Workspace isolation) | TODO (depends on 4) | — |
 | Phase 7 (REST + MCP + Sessions) | TODO (depends on 5) | — |
 
@@ -697,10 +697,12 @@ git commit -m "feat: per-agent task concurrency with configurable max"
 **Effort:** Large (6-10 hours)
 **Dependencies:** Phases 1, 4
 
+**Library:** `sql.js` (pure JS/WASM SQLite — no native compilation, no node-gyp, works everywhere). Chosen over `better-sqlite3` to avoid requiring a C compiler and Python on end-user machines.
+
 ### Task 5.1: Extract TaskStore interface
 
 **Files:**
-- Modify: `src/coordinator/tasks.ts` (extract interface, rename class)
+- Modify: `src/coordinator/tasks.ts` (extract interface)
 - Test: `tests/coordinator/tasks.test.ts` (unchanged, verify still passes)
 
 - [ ] **Step 1: Extract `TaskStore` interface from TaskTracker**
@@ -718,7 +720,9 @@ export interface TaskStore {
 }
 ```
 
-- [ ] **Step 2: Run tests — all pass (no behavior change)**
+Make `TaskTracker` implement `TaskStore`. No behavior change.
+
+- [ ] **Step 2: Run tests — all pass**
 - [ ] **Step 3: Commit**
 
 ---
@@ -729,17 +733,47 @@ export interface TaskStore {
 - Create: `src/coordinator/sqlite-store.ts`
 - Create: `tests/coordinator/sqlite-store.test.ts`
 
-- [ ] **Step 1: Install better-sqlite3**
+- [ ] **Step 1: Install sql.js**
 
 ```bash
-npm install better-sqlite3
-npm install -D @types/better-sqlite3
+npm install sql.js
 ```
 
+No `@types` package needed — sql.js ships its own TypeScript declarations.
+
 - [ ] **Step 2: Write tests (mirror TaskTracker tests)**
+
+Use in-memory SQLite (no file path) for tests. Tests should cover: create, get, list, list-by-status, setRunning, appendOutput, output truncation, setCompleted, setError, cleanup.
+
 - [ ] **Step 3: Implement SqliteTaskStore**
 
-Use `:memory:` for tests. Auto-create tables on construction. Store output as JSON text. Implement same interface as TaskStore.
+Schema:
+```sql
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  agent_name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  session_id TEXT,
+  trace_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+
+CREATE TABLE task_output (
+  task_id TEXT NOT NULL,
+  line_num INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (task_id, line_num),
+  FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+```
+
+Output in a separate table — avoids loading full output into memory for list queries. Implements `TaskStore` interface.
+
+Note: `sql.js` is synchronous after initialization (the WASM module loads async once, then all DB operations are sync). The `TaskStore` interface is sync, so this works naturally. Wrap the async init in a factory function: `createSqliteStore(dbPath?: string): Promise<SqliteTaskStore>`.
 
 - [ ] **Step 4: Run tests, commit**
 
@@ -757,9 +791,25 @@ Use `:memory:` for tests. Auto-create tables on construction. Store output as JS
 it('enqueues and dequeues tasks in FIFO order', () => { ... });
 it('dequeues for specific agent first, then any-agent tasks', () => { ... });
 it('returns null when queue is empty', () => { ... });
+it('removes a queued task by id', () => { ... });
+it('returns queue depth', () => { ... });
 ```
 
-- [ ] **Step 2: Implement TaskQueue** (SQLite-backed or in-memory)
+- [ ] **Step 2: Implement TaskQueue**
+
+In-memory queue backed by an array (simple, correct). Optional SQLite backing can come later if needed. Interface:
+
+```typescript
+export interface TaskQueue {
+  enqueue(taskId: string, agentName?: string): void;
+  dequeue(agentName?: string): string | null;
+  remove(taskId: string): void;
+  depth(): number;
+}
+```
+
+Dequeue priority: agent-specific tasks first, then any-agent tasks, FIFO within each group.
+
 - [ ] **Step 3: Run tests, commit**
 
 ---
@@ -767,18 +817,31 @@ it('returns null when queue is empty', () => { ... });
 ### Task 5.4: Wire SQLite + queue into coordinator
 
 **Files:**
-- Modify: `src/coordinator/server.ts`
+- Modify: `src/coordinator/server.ts` (accept TaskStore, use queue)
 - Modify: `src/shared/config.ts` (storage config)
 - Modify: `src/cli/commands/serve.ts` (--storage, --db-path flags)
 
-- [ ] **Step 1: Add storage config options**
-- [ ] **Step 2: In server, use SqliteTaskStore when configured**
-- [ ] **Step 3: On task:complete/task:error, process queue**
-- [ ] **Step 4: On agent register (idle), process queue**
-- [ ] **Step 5: Run full test suite, commit**
+- [ ] **Step 1: Add storage config and CLI flags**
+
+```typescript
+// serve.ts
+.option('--storage <type>', 'Storage backend: memory (default) or sqlite')
+.option('--db-path <path>', 'SQLite database file path (default: ~/.coord/tasks.db)')
+```
+
+- [ ] **Step 2: In server constructor, accept a TaskStore instead of creating TaskTracker internally**
+
+```typescript
+constructor(options: CoordinatorOptions & { store?: TaskStore; queue?: TaskQueue })
+```
+
+- [ ] **Step 3: On task:complete/task:error, process queue — dequeue next task for the freed agent**
+- [ ] **Step 4: On agent register (idle with capacity), process queue**
+- [ ] **Step 5: On coordinator start with SQLite, mark stale `running` tasks as `error`**
+- [ ] **Step 6: Run full test suite, commit**
 
 ```bash
-git commit -m "feat: SQLite persistence and task queue"
+git commit -m "feat: SQLite persistence and task queue with sql.js"
 ```
 
 ---
