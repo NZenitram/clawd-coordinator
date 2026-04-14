@@ -87,7 +87,7 @@ export class CoordMcpServer {
         }),
       },
       async (args) => {
-        const ws = this.requireWs();
+        const ws = await this.ensureConnected();
         const response = await sendRequest(ws, 'dispatch-task', {
           agentName: args.agentName,
           prompt: args.prompt,
@@ -123,7 +123,7 @@ export class CoordMcpServer {
         inputSchema: z.object({}),
       },
       async () => {
-        const ws = this.requireWs();
+        const ws = await this.ensureConnected();
         const response = await sendRequest(ws, 'list-agents');
 
         const payload = response.payload as { data: unknown; error?: string };
@@ -148,13 +148,13 @@ export class CoordMcpServer {
         description: 'List tasks tracked by the coordinator, optionally filtered by status',
         inputSchema: z.object({
           status: z
-            .enum(['pending', 'running', 'complete', 'error'])
+            .enum(['pending', 'running', 'completed', 'error'])
             .optional()
             .describe('Filter by task status'),
         }),
       },
       async (args) => {
-        const ws = this.requireWs();
+        const ws = await this.ensureConnected();
         const response = await sendRequest(ws, 'list-tasks', {
           status: args.status,
         });
@@ -184,7 +184,7 @@ export class CoordMcpServer {
         }),
       },
       async (args) => {
-        const ws = this.requireWs();
+        const ws = await this.ensureConnected();
         const response = await sendRequest(ws, 'get-task', { taskId: args.taskId });
 
         const payload = response.payload as { data: unknown; error?: string };
@@ -203,6 +203,20 @@ export class CoordMcpServer {
     );
   }
 
+  private async ensureConnected(): Promise<WebSocket> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return this.ws;
+    }
+    // Attempt reconnect
+    try {
+      this.ws = await connectCli(this.coordinatorUrl, this.token);
+    } catch {
+      throw new Error('Not connected to coordinator and reconnect failed');
+    }
+    return this.ws;
+  }
+
+  /** @deprecated Use ensureConnected() for auto-reconnect */
   private requireWs(): WebSocket {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('Not connected to coordinator');

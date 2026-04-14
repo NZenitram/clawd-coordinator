@@ -51,8 +51,8 @@ export class Coordinator {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private dedup = new MessageDeduplicator();
   private taskOwners = new Map<string, WebSocket>();
-  /** Maps session-list requestId → { cliSocket, cliRequestId } */
-  private sessionListPending = new Map<string, { cliSocket: WebSocket; cliRequestId: string }>();
+  /** Maps session-list requestId → { cliSocket, cliRequestId, timer } */
+  private sessionListPending = new Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>();
   private queue: TaskQueue;
   private options: CoordinatorOptions;
 
@@ -76,6 +76,7 @@ export class Coordinator {
         store: this.tasks,
         registry: this.registry,
         token: this.options.token,
+        queue: this.queue,
       });
 
       if (this.options.tls) {
@@ -348,6 +349,7 @@ export class Coordinator {
           const { requestId, sessions, error } = msg.payload;
           const pending = this.sessionListPending.get(requestId);
           if (!pending) break;
+          clearTimeout(pending.timer);
           this.sessionListPending.delete(requestId);
           const { cliSocket, cliRequestId } = pending;
           if (cliSocket.readyState === WebSocket.OPEN) {
@@ -418,6 +420,7 @@ export class Coordinator {
       }
       for (const [reqId, pending] of this.sessionListPending) {
         if (pending.cliSocket === ws) {
+          clearTimeout(pending.timer);
           this.sessionListPending.delete(reqId);
         }
       }
@@ -432,7 +435,7 @@ export class Coordinator {
       const task = this.tasks.get(taskId);
       if (!task || task.status !== 'pending') continue;
 
-      if (!this.registry.tryAddTask(agentName, taskId)) break;
+      if (!this.registry.tryAddTask(agentName, task.id)) break;
 
       this.tasks.setRunning(taskId);
       logger.info({ agent: agentName, taskId, traceId: task.traceId }, 'Queued task dispatched');
@@ -629,7 +632,14 @@ export class Coordinator {
           return;
         }
         // Use requestId as the correlation key so we can route the response back
-        this.sessionListPending.set(requestId, { cliSocket: ws, cliRequestId: requestId });
+        const timer = setTimeout(() => {
+          const pending = this.sessionListPending.get(requestId);
+          if (pending) {
+            this.sessionListPending.delete(requestId);
+            this.sendError(pending.cliSocket, pending.cliRequestId, 'Session list request timed out');
+          }
+        }, 30000);
+        this.sessionListPending.set(requestId, { cliSocket: ws, cliRequestId: requestId, timer });
         agentWs.send(serializeMessage(createSessionListRequest({
           agentName,
           requestId,

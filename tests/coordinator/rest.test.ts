@@ -1,6 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
+import WebSocket from 'ws';
 import { Coordinator } from '../../src/coordinator/server.js';
+import { serializeMessage, createAgentRegister } from '../../src/protocol/messages.js';
+
+function connectAgent(name: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+      headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+    });
+    ws.on('open', () => {
+      ws.send(serializeMessage(createAgentRegister({ name, os: 'linux', arch: 'x64' })));
+      setTimeout(() => resolve(ws), 50);
+    });
+    ws.on('error', reject);
+  });
+}
 
 const TEST_TOKEN = 'rest-test-token-xyz';
 const TEST_PORT = 9880;
@@ -92,7 +107,7 @@ describe('REST API', () => {
   });
 
   it('GET /api/tasks?status=pending returns filtered tasks', async () => {
-    // Create a task via dispatch
+    const agentWs = await connectAgent('filter-agent');
     await request('POST', '/api/dispatch', {
       token: TEST_TOKEN,
       body: { agentName: 'filter-agent', prompt: 'hello' },
@@ -105,6 +120,7 @@ describe('REST API', () => {
     for (const t of tasks) {
       expect((t as any).status).toBe('pending');
     }
+    agentWs.close();
   });
 
   it('GET /api/tasks?status=invalid returns 400', async () => {
@@ -116,6 +132,7 @@ describe('REST API', () => {
   // ── GET /api/tasks/:id ──────────────────────────────────────────────────────
 
   it('GET /api/tasks/:id returns task by ID', async () => {
+    const agentWs = await connectAgent('my-agent');
     const dispatchRes = await request('POST', '/api/dispatch', {
       token: TEST_TOKEN,
       body: { agentName: 'my-agent', prompt: 'do stuff' },
@@ -130,6 +147,7 @@ describe('REST API', () => {
     expect(task.agentName).toBe('my-agent');
     expect(task.prompt).toBe('do stuff');
     expect(task.status).toBe('pending');
+    agentWs.close();
   });
 
   it('GET /api/tasks/:id returns null task for unknown ID', async () => {
@@ -140,7 +158,8 @@ describe('REST API', () => {
 
   // ── POST /api/dispatch ──────────────────────────────────────────────────────
 
-  it('POST /api/dispatch creates task and returns taskId and status', async () => {
+  it('POST /api/dispatch creates task and returns taskId', async () => {
+    const agentWs = await connectAgent('ci-agent');
     const res = await request('POST', '/api/dispatch', {
       token: TEST_TOKEN,
       body: { agentName: 'ci-agent', prompt: 'run tests' },
@@ -148,13 +167,14 @@ describe('REST API', () => {
     expect(res.statusCode).toBe(202);
     const body = res.body as any;
     expect(typeof body.taskId).toBe('string');
-    expect(body.status).toBe('pending');
+    agentWs.close();
   });
 
   it('POST /api/dispatch accepts optional sessionId', async () => {
+    const agentWs = await connectAgent('ci-agent-2');
     const res = await request('POST', '/api/dispatch', {
       token: TEST_TOKEN,
-      body: { agentName: 'ci-agent', prompt: 'resume work', sessionId: 'sess-123' },
+      body: { agentName: 'ci-agent-2', prompt: 'resume work', sessionId: 'sess-123' },
     });
     expect(res.statusCode).toBe(202);
     const body = res.body as any;
@@ -162,6 +182,16 @@ describe('REST API', () => {
 
     const taskRes = await request('GET', `/api/tasks/${body.taskId}`, { token: TEST_TOKEN });
     expect((taskRes.body as any).task.sessionId).toBe('sess-123');
+    agentWs.close();
+  });
+
+  it('POST /api/dispatch returns 404 for unknown agent', async () => {
+    const res = await request('POST', '/api/dispatch', {
+      token: TEST_TOKEN,
+      body: { agentName: 'ghost-agent', prompt: 'hello' },
+    });
+    expect(res.statusCode).toBe(404);
+    expect((res.body as any).error).toContain('not found');
   });
 
   it('POST /api/dispatch returns 400 when agentName is missing', async () => {

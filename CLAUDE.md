@@ -87,7 +87,7 @@ src/
 - Strict TypeScript, `.js` extensions in all imports
 - Single quotes, 2-space indent
 - Tests in `tests/` mirroring `src/` structure
-- Run `npm test` before committing (105 tests across 11 suites)
+- Run `npm test` before committing (152 tests across 15 suites)
 - Run `npm run lint` to type-check without emitting
 - TDD: write failing test, implement, verify, commit
 

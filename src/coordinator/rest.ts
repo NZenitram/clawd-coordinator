@@ -2,6 +2,7 @@ import { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { TaskStore, TaskStatus } from './tasks.js';
 import type { AgentRegistry } from './registry.js';
+import type { TaskQueue } from './queue.js';
 import { validateToken } from '../shared/auth.js';
 
 const VALID_STATUSES = new Set<TaskStatus>(['pending', 'running', 'completed', 'error']);
@@ -16,10 +17,21 @@ function sendJson(res: ServerResponse, statusCode: number, body: unknown): void 
   res.end(json);
 }
 
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let totalBytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
@@ -36,8 +48,9 @@ export function createRestHandler(options: {
   store: TaskStore;
   registry: AgentRegistry;
   token: string;
+  queue?: TaskQueue;
 }): (req: IncomingMessage, res: ServerResponse) => void {
-  const { store, registry, token } = options;
+  const { store, registry, token, queue } = options;
 
   return async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -121,12 +134,21 @@ export function createRestHandler(options: {
 
       const sessionId = typeof payload['sessionId'] === 'string' ? payload['sessionId'] : undefined;
 
+      const agent = registry.get(agentName);
+      if (!agent) {
+        sendJson(res, 404, { error: `Agent "${agentName}" not found` });
+        return;
+      }
+
       const traceId = randomUUID();
-      // maxBudgetUsd is accepted in the body for forward-compatibility but is applied
-      // at dispatch time via the WebSocket protocol — not stored on the task in V1.
       const task = store.create({ agentName, prompt, sessionId, traceId });
 
-      sendJson(res, 202, { taskId: task.id, status: task.status });
+      if (queue) {
+        queue.enqueue(task.id, agentName);
+        sendJson(res, 202, { taskId: task.id, status: 'queued' });
+      } else {
+        sendJson(res, 202, { taskId: task.id, status: task.status });
+      }
       return;
     }
 

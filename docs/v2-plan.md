@@ -18,10 +18,10 @@
 | Phase 4 (Per-agent concurrency) | COMPLETE | 73 → 81 |
 | Phase 4.5 (Remediation) | COMPLETE | 81 → 84 |
 | Phase 5 (SQLite + task queue) | COMPLETE | 84 → 105 |
-| Phase 6 (Workspace isolation) | TODO (depends on 4) | — |
-| Phase 7 (REST + MCP + Sessions) | TODO (depends on 5) | — |
+| Phase 6 (Workspace isolation) | COMPLETE | 105 → 121 |
+| Phase 7 (REST + MCP + Sessions) | COMPLETE | 121 → 152 |
 
-**Next up:** Phase 5 (SQLite persistence + task queue) — Phase 6 (workspace isolation) can follow after.
+**All phases complete.** 152 tests across 15 suites.
 
 ---
 
