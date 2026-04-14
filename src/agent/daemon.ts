@@ -21,6 +21,7 @@ export interface AgentDaemonOptions {
   maxReconnectDelayMs?: number;
   workingDirectory?: string;
   taskTimeoutMs?: number;
+  dangerouslySkipPermissions?: boolean;
 }
 
 export class AgentDaemon {
@@ -158,6 +159,7 @@ export class AgentDaemon {
         sessionId,
         workingDirectory: this.options.workingDirectory,
         timeoutMs: this.options.taskTimeoutMs,
+        dangerouslySkipPermissions: this.options.dangerouslySkipPermissions,
         onOutput: (data) => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(serializeMessage(createTaskOutput({ taskId, data })));

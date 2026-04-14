@@ -188,6 +188,36 @@ describe('Coordinator', () => {
     cli.close();
   });
 
+  it('errors running task when agent disconnects', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = await connectWs('/agent');
+    agentWs.send(serializeMessage(createAgentRegister({ name: 'crash-agent', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    const cli = await connectWs('/cli');
+    const dispatchResponse = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'crash-agent', prompt: 'work' } }))
+    );
+    const taskId = (parseMessage(dispatchResponse)!.payload as any).data.taskId;
+
+    agentWs.close();
+
+    const errorMsg = await new Promise<string>((resolve) => {
+      cli.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg?.type === 'task:error' && (msg.payload as any).taskId === taskId) {
+          resolve((msg.payload as any).error);
+        }
+      });
+    });
+
+    expect(errorMsg).toBe('Agent disconnected while task was running');
+    cli.close();
+  });
+
   it('prevents second CLI from subscribing to another CLIs task', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();

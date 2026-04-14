@@ -124,4 +124,30 @@ describe('Executor', () => {
       expect.any(Object)
     );
   });
+
+  it('includes --dangerouslySkipPermissions when enabled', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      dangerouslySkipPermissions: true,
+      onOutput: () => {},
+    });
+
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      expect.arrayContaining(['--dangerouslySkipPermissions']),
+      expect.any(Object)
+    );
+  });
+
+  it('omits --dangerouslySkipPermissions when not set', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      onOutput: () => {},
+    });
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).not.toContain('--dangerouslySkipPermissions');
+  });
 });

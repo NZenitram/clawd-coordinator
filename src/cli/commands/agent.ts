@@ -7,12 +7,14 @@ export const agentCommand = new Command('agent')
   .requiredOption('--token <token>', 'Auth token')
   .requiredOption('--name <name>', 'Agent name')
   .option('--cwd <directory>', 'Working directory for Claude Code')
-  .action(async (options: { url: string; token: string; name: string; cwd?: string }) => {
+  .option('--dangerously-skip-permissions', 'Skip Claude permission prompts for headless use')
+  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean }) => {
     const daemon = new AgentDaemon({
       name: options.name,
       coordinatorUrl: options.url,
       token: options.token,
       workingDirectory: options.cwd,
+      dangerouslySkipPermissions: options.dangerouslySkipPermissions,
     });
 
     try {

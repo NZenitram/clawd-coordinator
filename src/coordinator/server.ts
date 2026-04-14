@@ -286,6 +286,24 @@ export class Coordinator {
 
     ws.on('close', () => {
       if (agentName) {
+        const agent = this.registry.get(agentName);
+        if (agent && agent.status === 'busy' && agent.currentTaskId) {
+          const taskId = agent.currentTaskId;
+          this.tasks.setError(taskId, 'Agent disconnected while task was running');
+          const subs = this.taskSubscribers.get(taskId);
+          if (subs) {
+            const errMsg = serializeMessage(createTaskError({
+              taskId,
+              error: 'Agent disconnected while task was running',
+            }));
+            for (const cli of subs) {
+              if (cli.readyState === WebSocket.OPEN) {
+                cli.send(errMsg);
+              }
+            }
+            this.taskSubscribers.delete(taskId);
+          }
+        }
         logger.info({ agent: agentName }, 'Agent disconnected');
         this.registry.unregister(agentName);
         this.agentSockets.delete(agentName);

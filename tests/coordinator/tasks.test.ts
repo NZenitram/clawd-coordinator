@@ -76,7 +76,7 @@ describe('TaskTracker', () => {
     expect(tracker.list('pending')).toHaveLength(1);
   });
 
-  it('caps output at maxOutputLines', () => {
+  it('caps output at maxOutputLines with truncation marker', () => {
     const smallTracker = new TaskTracker({ maxOutputLines: 3 });
     const task = smallTracker.create({ agentName: 'a', prompt: 'test' });
     smallTracker.setRunning(task.id);
@@ -84,7 +84,22 @@ describe('TaskTracker', () => {
     expect(smallTracker.appendOutput(task.id, 'line 2')).toBe(true);
     expect(smallTracker.appendOutput(task.id, 'line 3')).toBe(true);
     expect(smallTracker.appendOutput(task.id, 'line 4')).toBe(false);
-    expect(smallTracker.get(task.id)!.output).toHaveLength(3);
+    const updated = smallTracker.get(task.id)!;
+    expect(updated.truncated).toBe(true);
+    expect(updated.output).toHaveLength(4); // 3 lines + marker
+    expect(updated.output[3]).toBe('[OUTPUT TRUNCATED at 3 lines]');
+  });
+
+  it('drops output after truncation without adding more lines', () => {
+    const smallTracker = new TaskTracker({ maxOutputLines: 2 });
+    const task = smallTracker.create({ agentName: 'a', prompt: 'test' });
+    smallTracker.setRunning(task.id);
+    smallTracker.appendOutput(task.id, 'line 1');
+    smallTracker.appendOutput(task.id, 'line 2');
+    smallTracker.appendOutput(task.id, 'line 3');
+    smallTracker.appendOutput(task.id, 'line 4');
+    smallTracker.appendOutput(task.id, 'line 5');
+    expect(smallTracker.get(task.id)!.output).toHaveLength(3); // 2 + marker
   });
 
   it('cleans up old completed tasks', () => {

@@ -7,6 +7,7 @@ export interface RunOptions {
   model?: string;
   maxBudgetUsd?: number;
   timeoutMs?: number;
+  dangerouslySkipPermissions?: boolean;
   onOutput: (data: string) => void;
   onError?: (data: string) => void;
 }
@@ -40,6 +41,9 @@ export class Executor {
     }
     if (options.maxBudgetUsd !== undefined) {
       args.unshift('--max-budget-usd', String(options.maxBudgetUsd));
+    }
+    if (options.dangerouslySkipPermissions) {
+      args.unshift('--dangerouslySkipPermissions');
     }
 
     // -- separator prevents prompt from being interpreted as flags

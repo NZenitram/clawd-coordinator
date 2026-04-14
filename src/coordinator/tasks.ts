@@ -9,6 +9,7 @@ export interface Task {
   sessionId?: string;
   status: TaskStatus;
   output: string[];
+  truncated: boolean;
   error?: string;
   createdAt: number;
   completedAt?: number;
@@ -30,6 +31,7 @@ export class TaskTracker {
       sessionId: params.sessionId,
       status: 'pending',
       output: [],
+      truncated: false,
       createdAt: Date.now(),
     };
     this.tasks.set(task.id, task);
@@ -58,7 +60,12 @@ export class TaskTracker {
   appendOutput(id: string, data: string): boolean {
     const task = this.tasks.get(id);
     if (!task) return false;
-    if (task.output.length >= this.maxOutputLines) return false;
+    if (task.truncated) return false;
+    if (task.output.length >= this.maxOutputLines) {
+      task.truncated = true;
+      task.output.push(`[OUTPUT TRUNCATED at ${this.maxOutputLines} lines]`);
+      return false;
+    }
     task.output.push(data);
     return true;
   }
