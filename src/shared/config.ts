@@ -6,6 +6,10 @@ export interface CoordConfig {
   token: string;
   coordinatorUrl?: string;
   port?: number;
+  tls?: {
+    cert: string;
+    key: string;
+  };
 }
 
 const CONFIG_DIR = join(homedir(), '.coord');

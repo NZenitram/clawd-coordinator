@@ -27,7 +27,9 @@ describe('End-to-end dispatch', () => {
 
     // Connect a fake agent
     const agentWs = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent?token=${TEST_TOKEN}`);
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+        headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+      });
       ws.on('open', () => resolve(ws));
       ws.on('error', reject);
     });
@@ -115,7 +117,9 @@ describe('End-to-end dispatch', () => {
     await coordinator.start();
 
     const agentWs = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent?token=${TEST_TOKEN}`);
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+        headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+      });
       ws.on('open', () => resolve(ws));
       ws.on('error', reject);
     });

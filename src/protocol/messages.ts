@@ -122,6 +122,29 @@ export function serializeMessage(msg: AnyMessage): string {
   return JSON.stringify(msg);
 }
 
+// --- Message deduplication ---
+
+export class MessageDeduplicator {
+  private seen = new Set<string>();
+  private maxSize: number;
+
+  constructor(maxSize = 10000) {
+    this.maxSize = maxSize;
+  }
+
+  isDuplicate(messageId: string): boolean {
+    if (this.seen.has(messageId)) return true;
+    this.seen.add(messageId);
+    if (this.seen.size > this.maxSize) {
+      const iter = this.seen.values();
+      for (let i = 0; i < this.maxSize / 2; i++) {
+        this.seen.delete(iter.next().value!);
+      }
+    }
+    return false;
+  }
+}
+
 const VALID_TYPES = new Set([
   'agent:register', 'agent:heartbeat',
   'task:dispatch', 'task:output', 'task:complete', 'task:error',

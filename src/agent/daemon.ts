@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
 import { Executor } from './executor.js';
+import { logger } from '../shared/logger.js';
 import {
   parseMessage,
   serializeMessage,
@@ -60,10 +61,11 @@ export class AgentDaemon {
 
   private connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const url = `${this.options.coordinatorUrl}/agent?token=${this.options.token}`;
-      this.ws = new WebSocket(url);
+      const url = `${this.options.coordinatorUrl}/agent`;
+      this.ws = new WebSocket(url, { headers: { 'authorization': `Bearer ${this.options.token}` } });
 
       this.ws.on('open', () => {
+        logger.info({ coordinator: this.options.coordinatorUrl, name: this.options.name }, 'Agent connected');
         this.reconnectDelay = this.options.reconnectDelayMs ?? 1000;
 
         this.ws!.send(serializeMessage(createAgentRegister({
@@ -89,7 +91,35 @@ export class AgentDaemon {
         if (!msg) return;
 
         if (msg.type === 'task:dispatch') {
-          this.handleTask(msg.payload.taskId, msg.payload.prompt, msg.payload.sessionId);
+          const { taskId, prompt, sessionId } = msg.payload;
+
+          const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (!taskId || !uuidRegex.test(taskId)) {
+            return;
+          }
+
+          if (!prompt || typeof prompt !== 'string' || prompt.length > 1_000_000) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(serializeMessage(createTaskError({
+                taskId: taskId ?? 'unknown',
+                error: 'Invalid or oversized prompt',
+              })));
+            }
+            return;
+          }
+
+          if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(serializeMessage(createTaskError({
+                taskId,
+                error: 'Invalid sessionId format',
+              })));
+            }
+            return;
+          }
+
+          logger.info({ taskId }, 'Task received');
+          this.handleTask(taskId, prompt, sessionId);
         }
       });
 
@@ -113,6 +143,7 @@ export class AgentDaemon {
 
   private scheduleReconnect(): void {
     const maxDelay = this.options.maxReconnectDelayMs ?? 30000;
+    logger.info({ delay: this.reconnectDelay }, 'Scheduling reconnect');
     this.reconnectTimer = setTimeout(() => {
       this.connect().catch(() => {});
     }, this.reconnectDelay);
@@ -137,6 +168,7 @@ export class AgentDaemon {
         },
       });
 
+      logger.info({ taskId, exitCode: result.exitCode, timedOut: result.timedOut }, 'Task finished');
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (result.exitCode === 0) {
           this.ws.send(serializeMessage(createTaskComplete({ taskId })));
@@ -157,6 +189,7 @@ export class AgentDaemon {
         }
       }
     } catch (err) {
+      logger.error({ taskId, error: err instanceof Error ? err.message : String(err) }, 'Task execution failed');
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(serializeMessage(createTaskError({
           taskId,

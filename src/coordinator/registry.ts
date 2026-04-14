@@ -67,4 +67,11 @@ export class AgentRegistry {
       (a) => a.status !== 'busy' && now - a.lastHeartbeat > thresholdMs
     );
   }
+
+  getDeadBusyAgents(busyTimeoutMs: number): AgentInfo[] {
+    const now = Date.now();
+    return Array.from(this.agents.values()).filter(
+      (a) => a.status === 'busy' && now - a.lastHeartbeat > busyTimeoutMs
+    );
+  }
 }

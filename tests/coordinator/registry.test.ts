@@ -79,6 +79,25 @@ describe('AgentRegistry', () => {
     expect(staleAgents[0].name).toBe('stale-agent');
   });
 
+  it('detects dead busy agents', () => {
+    registry.register('working-agent', { os: 'linux', arch: 'x64' });
+    registry.setBusy('working-agent', 'task-1');
+    const agent = registry.get('working-agent')!;
+    agent.lastHeartbeat = Date.now() - 600000;
+
+    const dead = registry.getDeadBusyAgents(300000);
+    expect(dead).toHaveLength(1);
+    expect(dead[0].name).toBe('working-agent');
+  });
+
+  it('does not flag recently active busy agents', () => {
+    registry.register('active-agent', { os: 'linux', arch: 'x64' });
+    registry.setBusy('active-agent', 'task-1');
+
+    const dead = registry.getDeadBusyAgents(300000);
+    expect(dead).toHaveLength(0);
+  });
+
   it('excludes busy agents from staleness check', () => {
     registry.register('busy-agent', { os: 'linux', arch: 'x64' });
     registry.setBusy('busy-agent', 'task-1');

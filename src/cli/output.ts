@@ -8,7 +8,7 @@ import {
 
 export function connectCli(coordinatorUrl: string, token: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${coordinatorUrl}/cli?token=${token}`);
+    const ws = new WebSocket(`${coordinatorUrl}/cli`, { headers: { 'authorization': `Bearer ${token}` } });
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
   });

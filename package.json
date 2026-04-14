@@ -2,6 +2,8 @@
   "name": "clawd-coordinator",
   "version": "0.1.0",
   "description": "Orchestrate remote Claude Code sessions across machines",
+  "license": "MIT",
+  "author": "SoazCloud (https://soazcloud.com)",
   "type": "module",
   "bin": {
     "coord": "./dist/cli/index.js"
@@ -9,7 +11,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "vitest run",
+    "test": "COORD_LOG_LEVEL=silent vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit"
   },
@@ -18,6 +20,7 @@
   },
   "dependencies": {
     "commander": "^13.0.0",
+    "pino": "^10.3.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

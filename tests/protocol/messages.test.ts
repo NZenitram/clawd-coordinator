@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  MessageDeduplicator,
   createAgentRegister,
   createAgentHeartbeat,
   createTaskDispatch,
@@ -105,5 +106,24 @@ describe('serialization', () => {
 
   it('returns null for valid JSON missing type field', () => {
     expect(parseMessage(JSON.stringify({ foo: 'bar' }))).toBeNull();
+  });
+});
+
+describe('MessageDeduplicator', () => {
+  it('detects duplicate message IDs', () => {
+    const dedup = new MessageDeduplicator();
+    expect(dedup.isDuplicate('msg-1')).toBe(false);
+    expect(dedup.isDuplicate('msg-1')).toBe(true);
+    expect(dedup.isDuplicate('msg-2')).toBe(false);
+  });
+
+  it('evicts old entries when max size exceeded', () => {
+    const dedup = new MessageDeduplicator(4);
+    dedup.isDuplicate('a');
+    dedup.isDuplicate('b');
+    dedup.isDuplicate('c');
+    dedup.isDuplicate('d');
+    dedup.isDuplicate('e'); // triggers eviction
+    expect(dedup.isDuplicate('a')).toBe(false); // was evicted
   });
 });
