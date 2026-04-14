@@ -65,4 +65,28 @@ describe('AgentRegistry', () => {
     expect(agent.status).toBe('idle');
     expect(agent.currentTaskId).toBeUndefined();
   });
+
+  it('detects stale agents based on heartbeat threshold', () => {
+    registry.register('fresh-agent', { os: 'linux', arch: 'x64' });
+    registry.register('stale-agent', { os: 'linux', arch: 'x64' });
+
+    // Manually backdate the stale agent's heartbeat
+    const stale = registry.get('stale-agent')!;
+    stale.lastHeartbeat = Date.now() - 120000; // 2 minutes ago
+
+    const staleAgents = registry.getStaleAgents(90000); // 90s threshold
+    expect(staleAgents).toHaveLength(1);
+    expect(staleAgents[0].name).toBe('stale-agent');
+  });
+
+  it('excludes busy agents from staleness check', () => {
+    registry.register('busy-agent', { os: 'linux', arch: 'x64' });
+    registry.setBusy('busy-agent', 'task-1');
+
+    const agent = registry.get('busy-agent')!;
+    agent.lastHeartbeat = Date.now() - 120000;
+
+    const staleAgents = registry.getStaleAgents(90000);
+    expect(staleAgents).toHaveLength(0);
+  });
 });

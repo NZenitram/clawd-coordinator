@@ -19,6 +19,7 @@ export interface AgentDaemonOptions {
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
   workingDirectory?: string;
+  taskTimeoutMs?: number;
 }
 
 export class AgentDaemon {
@@ -119,20 +120,20 @@ export class AgentDaemon {
   }
 
   private async handleTask(taskId: string, prompt: string, sessionId: string | undefined): Promise<void> {
+    const stderrChunks: string[] = [];
     try {
       const result = await this.executor.run({
         prompt,
         sessionId,
         workingDirectory: this.options.workingDirectory,
+        timeoutMs: this.options.taskTimeoutMs,
         onOutput: (data) => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(serializeMessage(createTaskOutput({ taskId, data })));
           }
         },
         onError: (data) => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(serializeMessage(createTaskOutput({ taskId, data })));
-          }
+          stderrChunks.push(data);
         },
       });
 
@@ -140,9 +141,18 @@ export class AgentDaemon {
         if (result.exitCode === 0) {
           this.ws.send(serializeMessage(createTaskComplete({ taskId })));
         } else {
+          const stderr = stderrChunks.join('').trim();
+          let errorMsg: string;
+          if (result.timedOut) {
+            errorMsg = `Task timed out after ${(this.options.taskTimeoutMs ?? 1800000) / 1000}s`;
+          } else {
+            errorMsg = stderr
+              ? `Claude exited with code ${result.exitCode}: ${stderr}`
+              : `Claude exited with code ${result.exitCode}`;
+          }
           this.ws.send(serializeMessage(createTaskError({
             taskId,
-            error: `Claude exited with code ${result.exitCode}`,
+            error: errorMsg,
           })));
         }
       }

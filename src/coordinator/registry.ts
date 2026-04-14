@@ -60,4 +60,11 @@ export class AgentRegistry {
       agent.currentTaskId = undefined;
     }
   }
+
+  getStaleAgents(thresholdMs: number): AgentInfo[] {
+    const now = Date.now();
+    return Array.from(this.agents.values()).filter(
+      (a) => a.status !== 'busy' && now - a.lastHeartbeat > thresholdMs
+    );
+  }
 }

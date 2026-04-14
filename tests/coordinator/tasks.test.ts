@@ -75,4 +75,32 @@ describe('TaskTracker', () => {
     expect(tracker.list('running')).toHaveLength(1);
     expect(tracker.list('pending')).toHaveLength(1);
   });
+
+  it('caps output at maxOutputLines', () => {
+    const smallTracker = new TaskTracker({ maxOutputLines: 3 });
+    const task = smallTracker.create({ agentName: 'a', prompt: 'test' });
+    smallTracker.setRunning(task.id);
+    expect(smallTracker.appendOutput(task.id, 'line 1')).toBe(true);
+    expect(smallTracker.appendOutput(task.id, 'line 2')).toBe(true);
+    expect(smallTracker.appendOutput(task.id, 'line 3')).toBe(true);
+    expect(smallTracker.appendOutput(task.id, 'line 4')).toBe(false);
+    expect(smallTracker.get(task.id)!.output).toHaveLength(3);
+  });
+
+  it('cleans up old completed tasks', () => {
+    const t1 = tracker.create({ agentName: 'a', prompt: 'p1' });
+    const t2 = tracker.create({ agentName: 'b', prompt: 'p2' });
+    tracker.setRunning(t1.id);
+    tracker.setCompleted(t1.id);
+    tracker.setRunning(t2.id);
+
+    // Backdate the completed task
+    const completed = tracker.get(t1.id)!;
+    completed.completedAt = Date.now() - 7200000; // 2 hours ago
+
+    const removed = tracker.cleanup(3600000); // 1 hour threshold
+    expect(removed).toBe(1);
+    expect(tracker.get(t1.id)).toBeNull();
+    expect(tracker.get(t2.id)).not.toBeNull();
+  });
 });

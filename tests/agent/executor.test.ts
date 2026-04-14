@@ -46,7 +46,7 @@ describe('Executor', () => {
     expect(output.length).toBeGreaterThan(0);
     expect(spawn).toHaveBeenCalledWith(
       'claude',
-      ['-p', '--verbose', '--output-format', 'stream-json', 'say hello'],
+      ['-p', '--verbose', '--output-format', 'stream-json', '--', 'say hello'],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] })
     );
   });
@@ -79,7 +79,35 @@ describe('Executor', () => {
     });
 
     expect(result.exitCode).toBe(1);
+    expect(result.timedOut).toBe(false);
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('times out and kills the process', async () => {
+    (spawn as any).mockImplementationOnce(() => {
+      const proc = Object.assign(new EventEmitter(), {
+        stdout: new Readable({ read() {} }),
+        stderr: new Readable({ read() {} }),
+        kill: vi.fn(() => {
+          // Simulate process exiting after SIGTERM
+          setTimeout(() => {
+            proc.stdout.push(null);
+            proc.emit('close', null, 'SIGTERM');
+          }, 5);
+        }),
+      });
+      return proc;
+    });
+
+    const executor = new Executor();
+    const result = await executor.run({
+      prompt: 'hang forever',
+      timeoutMs: 50,
+      onOutput: () => {},
+    });
+
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).toBe(128);
   });
 
   it('passes sessionId as --resume flag', async () => {
@@ -92,7 +120,7 @@ describe('Executor', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       'claude',
-      ['--resume', 'session-123', '-p', '--verbose', '--output-format', 'stream-json', 'continue work'],
+      ['--resume', 'session-123', '-p', '--verbose', '--output-format', 'stream-json', '--', 'continue work'],
       expect.any(Object)
     );
   });

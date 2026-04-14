@@ -28,8 +28,8 @@ export function loadConfig(): CoordConfig | null {
 }
 
 export function saveConfig(config: CoordConfig): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
 }
 
 export function requireConfig(): CoordConfig {

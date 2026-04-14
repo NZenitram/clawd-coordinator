@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'node:http';
 import { URL } from 'node:url';
 import { AgentRegistry } from './registry.js';
-import { TaskTracker } from './tasks.js';
+import { TaskTracker, type TaskStatus } from './tasks.js';
 import { validateToken } from '../shared/auth.js';
 import {
   parseMessage,
@@ -15,6 +15,9 @@ import {
 export interface CoordinatorOptions {
   port: number;
   token: string;
+  stalenessThresholdMs?: number;
+  stalenessCheckIntervalMs?: number;
+  taskCleanupMaxAgeMs?: number;
 }
 
 export class Coordinator {
@@ -24,6 +27,8 @@ export class Coordinator {
   private agentSockets = new Map<string, WebSocket>();
   private cliSockets = new Set<WebSocket>();
   private taskSubscribers = new Map<string, Set<WebSocket>>();
+  private stalenessTimer: ReturnType<typeof setInterval> | null = null;
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private options: CoordinatorOptions;
 
   constructor(options: CoordinatorOptions) {
@@ -32,16 +37,43 @@ export class Coordinator {
 
   async start(): Promise<void> {
     return new Promise((resolve) => {
-      this.wss = new WebSocketServer({ port: this.options.port }, () => {
+      this.wss = new WebSocketServer({ port: this.options.port, maxPayload: 1 * 1024 * 1024 }, () => {
         resolve();
       });
       this.wss.on('connection', (ws, req) => {
         this.handleConnection(ws, req);
       });
+
+      const stalenessThreshold = this.options.stalenessThresholdMs ?? 90000;
+      const stalenessInterval = this.options.stalenessCheckIntervalMs ?? 30000;
+      this.stalenessTimer = setInterval(() => {
+        const stale = this.registry.getStaleAgents(stalenessThreshold);
+        for (const agent of stale) {
+          const socket = this.agentSockets.get(agent.name);
+          if (socket) {
+            socket.close(4002, 'Stale agent');
+          }
+          this.registry.unregister(agent.name);
+          this.agentSockets.delete(agent.name);
+        }
+      }, stalenessInterval);
+
+      const cleanupMaxAge = this.options.taskCleanupMaxAgeMs ?? 3600000; // 1 hour
+      this.cleanupTimer = setInterval(() => {
+        this.tasks.cleanup(cleanupMaxAge);
+      }, 60000);
     });
   }
 
   async stop(): Promise<void> {
+    if (this.stalenessTimer) {
+      clearInterval(this.stalenessTimer);
+      this.stalenessTimer = null;
+    }
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
     if (!this.wss) return;
     for (const ws of this.agentSockets.values()) {
       ws.close();
@@ -179,7 +211,23 @@ export class Coordinator {
 
     ws.on('close', () => {
       this.cliSockets.delete(ws);
+      for (const [taskId, subs] of this.taskSubscribers) {
+        subs.delete(ws);
+        if (subs.size === 0) {
+          this.taskSubscribers.delete(taskId);
+        }
+      }
     });
+  }
+
+  private sendError(ws: WebSocket, requestId: string, error: string): void {
+    ws.send(serializeMessage(createCliResponse({ requestId, data: null, error })));
+  }
+
+  private requireStringArg(args: Record<string, unknown> | undefined, key: string): string | null {
+    const val = args?.[key];
+    if (typeof val === 'string' && val.length > 0) return val;
+    return null;
   }
 
   private handleCliRequest(
@@ -199,7 +247,12 @@ export class Coordinator {
         break;
       }
       case 'get-agent': {
-        const agent = this.registry.get(args?.name as string);
+        const name = this.requireStringArg(args, 'name');
+        if (!name) {
+          this.sendError(ws, requestId, 'Missing required argument: name');
+          return;
+        }
+        const agent = this.registry.get(name);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { agent },
@@ -207,25 +260,21 @@ export class Coordinator {
         break;
       }
       case 'dispatch-task': {
-        const agentName = args?.agentName as string;
-        const prompt = args?.prompt as string;
+        const agentName = this.requireStringArg(args, 'agentName');
+        const prompt = this.requireStringArg(args, 'prompt');
+        if (!agentName || !prompt) {
+          this.sendError(ws, requestId, 'Missing required arguments: agentName, prompt');
+          return;
+        }
         const sessionId = args?.sessionId as string | undefined;
         const agent = this.registry.get(agentName);
 
         if (!agent) {
-          ws.send(serializeMessage(createCliResponse({
-            requestId,
-            data: null,
-            error: `Agent "${agentName}" not found`,
-          })));
+          this.sendError(ws, requestId, `Agent "${agentName}" not found`);
           return;
         }
         if (agent.status === 'busy') {
-          ws.send(serializeMessage(createCliResponse({
-            requestId,
-            data: null,
-            error: `Agent "${agentName}" is busy with task ${agent.currentTaskId}`,
-          })));
+          this.sendError(ws, requestId, `Agent "${agentName}" is busy with task ${agent.currentTaskId}`);
           return;
         }
 
@@ -254,8 +303,13 @@ export class Coordinator {
         break;
       }
       case 'list-tasks': {
-        const status = args?.status as string | undefined;
-        const tasks = this.tasks.list(status as any);
+        const validStatuses: TaskStatus[] = ['pending', 'running', 'completed', 'error'];
+        const statusArg = args?.status as string | undefined;
+        if (statusArg && !validStatuses.includes(statusArg as TaskStatus)) {
+          this.sendError(ws, requestId, `Invalid status filter: ${statusArg}. Valid: ${validStatuses.join(', ')}`);
+          return;
+        }
+        const tasks = this.tasks.list(statusArg as TaskStatus | undefined);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { tasks },
@@ -263,7 +317,12 @@ export class Coordinator {
         break;
       }
       case 'get-task': {
-        const task = this.tasks.get(args?.taskId as string);
+        const taskId = this.requireStringArg(args, 'taskId');
+        if (!taskId) {
+          this.sendError(ws, requestId, 'Missing required argument: taskId');
+          return;
+        }
+        const task = this.tasks.get(taskId);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { task },
@@ -271,7 +330,11 @@ export class Coordinator {
         break;
       }
       case 'subscribe-task': {
-        const taskId = args?.taskId as string;
+        const taskId = this.requireStringArg(args, 'taskId');
+        if (!taskId) {
+          this.sendError(ws, requestId, 'Missing required argument: taskId');
+          return;
+        }
         if (!this.taskSubscribers.has(taskId)) {
           this.taskSubscribers.set(taskId, new Set());
         }
@@ -283,11 +346,7 @@ export class Coordinator {
         break;
       }
       default: {
-        ws.send(serializeMessage(createCliResponse({
-          requestId,
-          data: null,
-          error: `Unknown command: ${command}`,
-        })));
+        this.sendError(ws, requestId, `Unknown command: ${command}`);
       }
     }
   }

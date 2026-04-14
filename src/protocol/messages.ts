@@ -122,12 +122,20 @@ export function serializeMessage(msg: AnyMessage): string {
   return JSON.stringify(msg);
 }
 
+const VALID_TYPES = new Set([
+  'agent:register', 'agent:heartbeat',
+  'task:dispatch', 'task:output', 'task:complete', 'task:error',
+  'cli:request', 'cli:response',
+]);
+
 export function parseMessage(raw: string): AnyMessage | null {
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || typeof parsed.type !== 'string') {
-      return null;
-    }
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    if (typeof parsed.id !== 'string') return null;
+    if (typeof parsed.type !== 'string' || !VALID_TYPES.has(parsed.type)) return null;
+    if (typeof parsed.timestamp !== 'number') return null;
+    if (typeof parsed.payload !== 'object' || parsed.payload === null) return null;
     return parsed as AnyMessage;
   } catch {
     return null;

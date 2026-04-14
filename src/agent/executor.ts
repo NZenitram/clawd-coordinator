@@ -6,12 +6,14 @@ export interface RunOptions {
   workingDirectory?: string;
   model?: string;
   maxBudgetUsd?: number;
+  timeoutMs?: number;
   onOutput: (data: string) => void;
   onError?: (data: string) => void;
 }
 
 export interface RunResult {
   exitCode: number;
+  timedOut: boolean;
 }
 
 export class Executor {
@@ -22,20 +24,29 @@ export class Executor {
       '-p',
       '--verbose',
       '--output-format', 'stream-json',
-      options.prompt,
     ];
 
     if (options.sessionId) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(options.sessionId)) {
+        throw new Error(`Invalid sessionId format: ${options.sessionId}`);
+      }
       args.unshift('--resume', options.sessionId);
     }
     if (options.model) {
+      if (!/^[a-zA-Z0-9._-]+$/.test(options.model)) {
+        throw new Error(`Invalid model format: ${options.model}`);
+      }
       args.unshift('--model', options.model);
     }
     if (options.maxBudgetUsd !== undefined) {
       args.unshift('--max-budget-usd', String(options.maxBudgetUsd));
     }
 
+    // -- separator prevents prompt from being interpreted as flags
+    args.push('--', options.prompt);
+
     const cwd = options.workingDirectory ?? process.cwd();
+    const timeoutMs = options.timeoutMs ?? 1800000; // 30 min default
 
     return new Promise<RunResult>((resolve) => {
       const proc = spawn('claude', args, {
@@ -44,6 +55,18 @@ export class Executor {
       });
 
       this.currentProcess = proc;
+      let timedOut = false;
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        proc.kill('SIGTERM');
+        killTimer = setTimeout(() => {
+          if (this.currentProcess === proc) {
+            proc.kill('SIGKILL');
+          }
+        }, 5000);
+      }, timeoutMs);
 
       proc.stdout!.on('data', (chunk: Buffer) => {
         const lines = chunk.toString().split('\n').filter(Boolean);
@@ -59,9 +82,14 @@ export class Executor {
         }
       });
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
+        clearTimeout(timeoutTimer);
+        if (killTimer) clearTimeout(killTimer);
         this.currentProcess = null;
-        resolve({ exitCode: code ?? 1 });
+        resolve({
+          exitCode: code ?? (signal ? 128 : 1),
+          timedOut,
+        });
       });
     });
   }

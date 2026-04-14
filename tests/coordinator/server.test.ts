@@ -99,6 +99,38 @@ describe('Coordinator', () => {
     ws.close();
   });
 
+  it('rejects dispatch-task with missing args', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const cli = await connectWs(`/cli?token=${TEST_TOKEN}`);
+    const response = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: {} }))
+    );
+    const parsed = parseMessage(response);
+    expect(parsed).not.toBeNull();
+    expect((parsed!.payload as any).error).toContain('Missing required arguments');
+
+    cli.close();
+  });
+
+  it('rejects list-tasks with invalid status filter', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const cli = await connectWs(`/cli?token=${TEST_TOKEN}`);
+    const response = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'list-tasks', args: { status: 'bogus' } }))
+    );
+    const parsed = parseMessage(response);
+    expect(parsed).not.toBeNull();
+    expect((parsed!.payload as any).error).toContain('Invalid status filter');
+
+    cli.close();
+  });
+
   it('removes agent on disconnect', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();

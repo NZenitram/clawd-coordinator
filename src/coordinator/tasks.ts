@@ -16,6 +16,11 @@ export interface Task {
 
 export class TaskTracker {
   private tasks = new Map<string, Task>();
+  private maxOutputLines: number;
+
+  constructor(options?: { maxOutputLines?: number }) {
+    this.maxOutputLines = options?.maxOutputLines ?? 10000;
+  }
 
   create(params: { agentName: string; prompt: string; sessionId?: string }): Task {
     const task: Task = {
@@ -50,11 +55,12 @@ export class TaskTracker {
     }
   }
 
-  appendOutput(id: string, data: string): void {
+  appendOutput(id: string, data: string): boolean {
     const task = this.tasks.get(id);
-    if (task) {
-      task.output.push(data);
-    }
+    if (!task) return false;
+    if (task.output.length >= this.maxOutputLines) return false;
+    task.output.push(data);
+    return true;
   }
 
   setCompleted(id: string): void {
@@ -72,5 +78,21 @@ export class TaskTracker {
       task.error = error;
       task.completedAt = Date.now();
     }
+  }
+
+  cleanup(maxAgeMs: number): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, task] of this.tasks) {
+      if (
+        (task.status === 'completed' || task.status === 'error') &&
+        task.completedAt &&
+        now - task.completedAt > maxAgeMs
+      ) {
+        this.tasks.delete(id);
+        removed++;
+      }
+    }
+    return removed;
   }
 }
