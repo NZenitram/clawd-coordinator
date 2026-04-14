@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
 import { Executor } from './executor.js';
+import { checkClaudeHealth } from './health.js';
 import { logger } from '../shared/logger.js';
 import {
   parseMessage,
@@ -22,16 +23,20 @@ export interface AgentDaemonOptions {
   workingDirectory?: string;
   taskTimeoutMs?: number;
   dangerouslySkipPermissions?: boolean;
+  maxConcurrent?: number;
 }
 
 export class AgentDaemon {
   private ws: WebSocket | null = null;
   private executor = new Executor();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay: number;
   private stopped = false;
   private options: AgentDaemonOptions;
+  private lastHealth: { claudeAvailable: boolean; version?: string } = { claudeAvailable: false };
+  private runningTaskCount = 0;
 
   constructor(options: AgentDaemonOptions) {
     this.options = options;
@@ -40,7 +45,17 @@ export class AgentDaemon {
 
   async start(): Promise<void> {
     this.stopped = false;
-    return this.connect();
+    const health = await checkClaudeHealth();
+    this.lastHealth = { claudeAvailable: health.available, version: health.version };
+    logger.info({ health: this.lastHealth }, 'Initial health check');
+
+    await this.connect();
+
+    // Start health check timer only after successful connection
+    this.healthCheckTimer = setInterval(async () => {
+      const h = await checkClaudeHealth();
+      this.lastHealth = { claudeAvailable: h.available, version: h.version };
+    }, 300000);
   }
 
   async stop(): Promise<void> {
@@ -48,6 +63,10 @@ export class AgentDaemon {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -61,6 +80,11 @@ export class AgentDaemon {
   }
 
   private connect(): Promise<void> {
+    // Clear any existing heartbeat timer to prevent leaks on reconnect
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     return new Promise((resolve, reject) => {
       const url = `${this.options.coordinatorUrl}/agent`;
       this.ws = new WebSocket(url, { headers: { 'authorization': `Bearer ${this.options.token}` } });
@@ -73,6 +97,8 @@ export class AgentDaemon {
           name: this.options.name,
           os: platform(),
           arch: arch(),
+          maxConcurrent: this.options.maxConcurrent,
+          health: this.lastHealth,
         })));
 
         const interval = this.options.heartbeatIntervalMs ?? 30000;
@@ -80,6 +106,7 @@ export class AgentDaemon {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(serializeMessage(createAgentHeartbeat({
               name: this.options.name,
+              health: this.lastHealth,
             })));
           }
         }, interval);
@@ -96,6 +123,17 @@ export class AgentDaemon {
 
           const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           if (!taskId || !uuidRegex.test(taskId)) {
+            return;
+          }
+
+          const localMax = this.options.maxConcurrent ?? 1;
+          if (this.runningTaskCount >= localMax) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(serializeMessage(createTaskError({
+                taskId,
+                error: `Agent at local capacity (${this.runningTaskCount}/${localMax})`,
+              })));
+            }
             return;
           }
 
@@ -120,7 +158,10 @@ export class AgentDaemon {
           }
 
           logger.info({ taskId, traceId }, 'Task received');
-          this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd);
+          this.runningTaskCount++;
+          this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd).finally(() => {
+            this.runningTaskCount--;
+          });
         }
       });
 
@@ -146,16 +187,21 @@ export class AgentDaemon {
     const maxDelay = this.options.maxReconnectDelayMs ?? 30000;
     logger.info({ delay: this.reconnectDelay }, 'Scheduling reconnect');
     this.reconnectTimer = setTimeout(() => {
-      this.connect().catch(() => {});
+      this.connect().catch((err) => {
+        logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'Reconnect failed');
+      });
     }, this.reconnectDelay);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, maxDelay);
   }
 
   private async handleTask(taskId: string, prompt: string, sessionId: string | undefined, traceId?: string, maxBudgetUsd?: number): Promise<void> {
     const stderrChunks: string[] = [];
+    const MAX_STDERR_BYTES = 1024 * 1024; // 1MB cap
+    let stderrBytes = 0;
     try {
       const result = await this.executor.run({
         prompt,
+        taskId,
         sessionId,
         workingDirectory: this.options.workingDirectory,
         timeoutMs: this.options.taskTimeoutMs,
@@ -167,7 +213,10 @@ export class AgentDaemon {
           }
         },
         onError: (data) => {
-          stderrChunks.push(data);
+          stderrBytes += Buffer.byteLength(data);
+          if (stderrBytes <= MAX_STDERR_BYTES) {
+            stderrChunks.push(data);
+          }
         },
       });
 

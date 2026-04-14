@@ -5,7 +5,7 @@
 Run the automated test suite:
 
 ```bash
-npm test          # 57 tests across 7 suites
+npm test          # 81 tests across 9 suites
 npm run lint      # TypeScript type-check (tsc --noEmit)
 ```
 
@@ -16,12 +16,14 @@ Tests are silenced for pino output via `COORD_LOG_LEVEL=silent` in the test scri
 | Suite | Tests | Covers |
 |-------|-------|--------|
 | `tests/protocol/messages.test.ts` | 13 | Message creation, serialization, round-trip, parseMessage validation, MessageDeduplicator |
-| `tests/coordinator/registry.test.ts` | 12 | Agent registration, heartbeat, status transitions, stale agent detection, dead busy agent detection |
-| `tests/coordinator/tasks.test.ts` | 11 | Task lifecycle, output append, output cap, cleanup, status filtering |
-| `tests/coordinator/server.test.ts` | 10 | Auth rejection, agent registration, heartbeat, disconnect, arg validation, status filter validation, name hijacking, task ownership |
-| `tests/agent/executor.test.ts` | 4 | Prompt execution, error exit, sessionId flag, timeout with SIGTERM |
+| `tests/coordinator/registry.test.ts` | 17 | Agent registration, heartbeat, status transitions, stale agent detection, dead busy agent detection, concurrency (addTask/removeTask/hasCapacity), health updates |
+| `tests/coordinator/tasks.test.ts` | 12 | Task lifecycle, output append, output cap, truncation, cleanup, status filtering |
+| `tests/coordinator/server.test.ts` | 12 | Auth rejection, agent registration, heartbeat, disconnect, arg validation, status filter validation, name hijacking, task ownership, unhealthy agent dispatch refusal |
+| `tests/agent/executor.test.ts` | 10 | Prompt execution, error exit, sessionId flag, timeout, dangerouslySkipPermissions, maxBudgetUsd, concurrent process tracking, killTask, kill-all |
 | `tests/agent/daemon.test.ts` | 4 | Connect/register, unregister on stop, non-UUID taskId rejection, oversized prompt rejection |
-| `tests/integration/dispatch.test.ts` | 3 | End-to-end dispatch+streaming, unknown agent error, busy agent error |
+| `tests/agent/health.test.ts` | 2 | Claude CLI health check (available/unavailable) |
+| `tests/integration/dispatch.test.ts` | 4 | End-to-end dispatch+streaming, unknown agent error, capacity rejection, multi-task concurrent dispatch |
+| `tests/shared/auth.test.ts` | 7 | Token generation, validation, per-agent token matching |
 
 ## Manual Integration Test
 
@@ -122,7 +124,7 @@ node dist/cli/index.js run "say hello" --on test-agent-1 --url ws://localhost:99
 
 Expected:
 - First dispatch succeeds with task ID
-- Second dispatch fails: `Error: Agent "test-agent-1" is busy with task <id>`
+- Second dispatch fails: `Error: Agent "test-agent-1" is at capacity (1/1 tasks)`
 - Exit code 1 on the second command
 - `coord agents` shows status `busy` with the task ID
 

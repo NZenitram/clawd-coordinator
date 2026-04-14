@@ -8,13 +8,15 @@ export const agentCommand = new Command('agent')
   .requiredOption('--name <name>', 'Agent name')
   .option('--cwd <directory>', 'Working directory for Claude Code')
   .option('--dangerously-skip-permissions', 'Skip Claude permission prompts for headless use')
-  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean }) => {
+  .option('--max-concurrent <n>', 'Maximum concurrent tasks (default: 1)', '1')
+  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean; maxConcurrent?: string }) => {
     const daemon = new AgentDaemon({
       name: options.name,
       coordinatorUrl: options.url,
       token: options.token,
       workingDirectory: options.cwd,
       dangerouslySkipPermissions: options.dangerouslySkipPermissions,
+      maxConcurrent: options.maxConcurrent ? parseInt(options.maxConcurrent, 10) : undefined,
     });
 
     try {
@@ -26,9 +28,11 @@ export const agentCommand = new Command('agent')
       process.exit(1);
     }
 
-    process.on('SIGINT', async () => {
+    const shutdown = async () => {
       console.log('\nDisconnecting...');
       await daemon.stop();
       process.exit(0);
-    });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   });

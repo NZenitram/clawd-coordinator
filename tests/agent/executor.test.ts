@@ -39,6 +39,7 @@ describe('Executor', () => {
 
     const result = await executor.run({
       prompt: 'say hello',
+      taskId: 'test-1',
       onOutput: (data) => output.push(data),
     });
 
@@ -74,6 +75,7 @@ describe('Executor', () => {
 
     const result = await executor.run({
       prompt: 'fail',
+      taskId: 'test-err',
       onOutput: () => {},
       onError: (data) => errors.push(data),
     });
@@ -102,6 +104,7 @@ describe('Executor', () => {
     const executor = new Executor();
     const result = await executor.run({
       prompt: 'hang forever',
+      taskId: 'test-timeout',
       timeoutMs: 50,
       onOutput: () => {},
     });
@@ -114,6 +117,7 @@ describe('Executor', () => {
     const executor = new Executor();
     await executor.run({
       prompt: 'continue work',
+      taskId: 'test-session',
       sessionId: 'session-123',
       onOutput: () => {},
     });
@@ -129,6 +133,7 @@ describe('Executor', () => {
     const executor = new Executor();
     await executor.run({
       prompt: 'test',
+      taskId: 'test-perms',
       dangerouslySkipPermissions: true,
       onOutput: () => {},
     });
@@ -140,14 +145,102 @@ describe('Executor', () => {
     );
   });
 
+  it('passes --max-budget-usd flag when budget is set', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      taskId: 'test-budget',
+      maxBudgetUsd: 5.0,
+      onOutput: () => {},
+    });
+
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      expect.arrayContaining(['--max-budget-usd', '5']),
+      expect.any(Object)
+    );
+  });
+
   it('omits --dangerouslySkipPermissions when not set', async () => {
     const executor = new Executor();
     await executor.run({
       prompt: 'test',
+      taskId: 'tid-1',
       onOutput: () => {},
     });
 
     const args = (spawn as any).mock.calls[0][1] as string[];
     expect(args).not.toContain('--dangerouslySkipPermissions');
+  });
+
+  it('tracks multiple concurrent processes by taskId', async () => {
+    const output1: string[] = [];
+    const output2: string[] = [];
+
+    const executor = new Executor();
+    const p1 = executor.run({ prompt: 'task1', taskId: 'id-1', onOutput: (d) => output1.push(d) });
+    const p2 = executor.run({ prompt: 'task2', taskId: 'id-2', onOutput: (d) => output2.push(d) });
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.exitCode).toBe(0);
+    expect(r2.exitCode).toBe(0);
+  });
+
+  it('kills a specific task by taskId', async () => {
+    // Create a process that hangs until killed
+    (spawn as any).mockImplementationOnce(() => {
+      const proc = Object.assign(new EventEmitter(), {
+        stdout: new Readable({ read() {} }),
+        stderr: new Readable({ read() {} }),
+        kill: vi.fn(() => {
+          setTimeout(() => {
+            proc.stdout.push(null);
+            proc.emit('close', null, 'SIGTERM');
+          }, 5);
+        }),
+      });
+      return proc;
+    });
+
+    const executor = new Executor();
+    const p = executor.run({ prompt: 'hang', taskId: 'kill-me', timeoutMs: 60000, onOutput: () => {} });
+    await new Promise(r => setTimeout(r, 5));
+
+    executor.killTask('kill-me');
+    const result = await p;
+    expect(result.exitCode).toBe(128); // SIGTERM
+  });
+
+  it('kill() kills all running processes', async () => {
+    // Both processes hang until killed
+    const mockProcs: any[] = [];
+    (spawn as any).mockImplementation(() => {
+      const proc = Object.assign(new EventEmitter(), {
+        stdout: new Readable({ read() {} }),
+        stderr: new Readable({ read() {} }),
+        kill: vi.fn(() => {
+          setTimeout(() => {
+            proc.stdout.push(null);
+            proc.emit('close', null, 'SIGTERM');
+          }, 5);
+        }),
+      });
+      mockProcs.push(proc);
+      return proc;
+    });
+
+    const executor = new Executor();
+    const p1 = executor.run({ prompt: 'a', taskId: 'a1', timeoutMs: 60000, onOutput: () => {} });
+    const p2 = executor.run({ prompt: 'b', taskId: 'b1', timeoutMs: 60000, onOutput: () => {} });
+    await new Promise(r => setTimeout(r, 5));
+
+    executor.kill();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.exitCode).toBe(128);
+    expect(r2.exitCode).toBe(128);
+    expect(mockProcs).toHaveLength(2);
+    for (const proc of mockProcs) {
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    }
   });
 });

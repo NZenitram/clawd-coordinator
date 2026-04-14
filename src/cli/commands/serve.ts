@@ -31,9 +31,11 @@ export const serveCommand = new Command('serve')
     }
     console.log('Press Ctrl+C to stop.');
 
-    process.on('SIGINT', async () => {
+    const shutdown = async () => {
       console.log('\nShutting down...');
       await coordinator.stop();
       process.exit(0);
-    });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   });

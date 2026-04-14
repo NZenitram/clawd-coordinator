@@ -1,9 +1,16 @@
+export interface AgentHealth {
+  claudeAvailable: boolean;
+  version?: string;
+}
+
 export interface AgentInfo {
   name: string;
   os: string;
   arch: string;
-  status: 'idle' | 'busy' | 'offline';
-  currentTaskId?: string;
+  status: 'idle' | 'active' | 'busy' | 'offline';
+  currentTaskIds: string[];
+  maxConcurrent: number;
+  health?: AgentHealth;
   connectedAt: number;
   lastHeartbeat: number;
 }
@@ -11,7 +18,7 @@ export interface AgentInfo {
 export class AgentRegistry {
   private agents = new Map<string, AgentInfo>();
 
-  register(name: string, meta: { os: string; arch: string }): void {
+  register(name: string, meta: { os: string; arch: string; maxConcurrent?: number }): void {
     if (this.agents.has(name)) {
       throw new Error(`Agent "${name}" is already registered`);
     }
@@ -21,6 +28,8 @@ export class AgentRegistry {
       os: meta.os,
       arch: meta.arch,
       status: 'idle',
+      currentTaskIds: [],
+      maxConcurrent: meta.maxConcurrent ?? 1,
       connectedAt: now,
       lastHeartbeat: now,
     });
@@ -45,33 +54,66 @@ export class AgentRegistry {
     }
   }
 
-  setBusy(name: string, taskId: string): void {
+  updateHealth(name: string, health: AgentHealth): void {
     const agent = this.agents.get(name);
     if (agent) {
-      agent.status = 'busy';
-      agent.currentTaskId = taskId;
+      agent.health = health;
     }
   }
 
-  setIdle(name: string): void {
+  hasCapacity(name: string): boolean {
+    const agent = this.agents.get(name);
+    if (!agent) return false;
+    return agent.currentTaskIds.length < agent.maxConcurrent;
+  }
+
+  tryAddTask(name: string, taskId: string): boolean {
+    const agent = this.agents.get(name);
+    if (!agent || agent.currentTaskIds.length >= agent.maxConcurrent) return false;
+    agent.currentTaskIds.push(taskId);
+    this.updateStatus(agent);
+    return true;
+  }
+
+  /** @internal Use tryAddTask for dispatch. This is only for reconnect/recovery. */
+  private addTaskUnchecked(name: string, taskId: string): void {
     const agent = this.agents.get(name);
     if (agent) {
+      agent.currentTaskIds.push(taskId);
+      this.updateStatus(agent);
+    }
+  }
+
+  removeTask(name: string, taskId: string): void {
+    const agent = this.agents.get(name);
+    if (agent) {
+      agent.currentTaskIds = agent.currentTaskIds.filter(id => id !== taskId);
+      this.updateStatus(agent);
+    }
+  }
+
+  private updateStatus(agent: AgentInfo): void {
+    const count = agent.currentTaskIds.length;
+    if (count === 0) {
       agent.status = 'idle';
-      agent.currentTaskId = undefined;
+    } else if (count < agent.maxConcurrent) {
+      agent.status = 'active';
+    } else {
+      agent.status = 'busy';
     }
   }
 
   getStaleAgents(thresholdMs: number): AgentInfo[] {
     const now = Date.now();
     return Array.from(this.agents.values()).filter(
-      (a) => a.status !== 'busy' && now - a.lastHeartbeat > thresholdMs
+      (a) => a.currentTaskIds.length === 0 && now - a.lastHeartbeat > thresholdMs
     );
   }
 
   getDeadBusyAgents(busyTimeoutMs: number): AgentInfo[] {
     const now = Date.now();
     return Array.from(this.agents.values()).filter(
-      (a) => a.status === 'busy' && now - a.lastHeartbeat > busyTimeoutMs
+      (a) => a.currentTaskIds.length > 0 && now - a.lastHeartbeat > busyTimeoutMs
     );
   }
 }

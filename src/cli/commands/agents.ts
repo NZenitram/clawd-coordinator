@@ -25,11 +25,11 @@ export const agentsCommand = new Command('agents')
       a.status,
       `${a.os}/${a.arch}`,
       formatDuration(now - a.connectedAt),
-      a.currentTaskId ?? '-',
+      a.currentTaskIds?.length > 0 ? a.currentTaskIds.map((id: string) => id.slice(0, 8)).join(', ') : '-',
     ]);
 
     console.log(formatTable(
-      ['NAME', 'STATUS', 'PLATFORM', 'UPTIME', 'CURRENT TASK'],
+      ['NAME', 'STATUS', 'PLATFORM', 'UPTIME', 'CURRENT TASKS'],
       rows
     ));
   });

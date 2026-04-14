@@ -1,10 +1,15 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+
+const COMPARE_KEY = 'coord-token-compare';
 
 export function validateAgentToken(provided: string, agentTokens: Record<string, string>): string | null {
+  let matchedName: string | null = null;
   for (const [name, token] of Object.entries(agentTokens)) {
-    if (validateToken(provided, token)) return name;
+    if (validateToken(provided, token)) {
+      matchedName = name;
+    }
   }
-  return null;
+  return matchedName;
 }
 
 export function generateToken(): string {
@@ -12,12 +17,7 @@ export function generateToken(): string {
 }
 
 export function validateToken(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) {
-    // Consume constant time even on length mismatch
-    timingSafeEqual(b, b);
-    return false;
-  }
+  const a = createHmac('sha256', COMPARE_KEY).update(provided).digest();
+  const b = createHmac('sha256', COMPARE_KEY).update(expected).digest();
   return timingSafeEqual(a, b);
 }

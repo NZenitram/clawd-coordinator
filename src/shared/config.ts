@@ -28,8 +28,16 @@ export function loadConfig(): CoordConfig | null {
   if (!existsSync(CONFIG_FILE)) {
     return null;
   }
-  const raw = readFileSync(CONFIG_FILE, 'utf-8');
-  return JSON.parse(raw) as CoordConfig;
+  try {
+    const raw = readFileSync(CONFIG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.token !== 'string') {
+      throw new Error('Invalid config: missing or non-string token');
+    }
+    return parsed as CoordConfig;
+  } catch (err) {
+    throw new Error(`Failed to read config at ${CONFIG_FILE}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export function saveConfig(config: CoordConfig): void {

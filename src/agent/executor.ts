@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 
 export interface RunOptions {
   prompt: string;
+  taskId?: string;
   sessionId?: string;
   workingDirectory?: string;
   model?: string;
@@ -18,7 +19,7 @@ export interface RunResult {
 }
 
 export class Executor {
-  private currentProcess: ChildProcess | null = null;
+  private processes = new Map<string, ChildProcess>();
 
   async run(options: RunOptions): Promise<RunResult> {
     const args = [
@@ -51,6 +52,7 @@ export class Executor {
 
     const cwd = options.workingDirectory ?? process.cwd();
     const timeoutMs = options.timeoutMs ?? 1800000; // 30 min default
+    const taskId = options.taskId ?? `anonymous-${Date.now()}`;
 
     return new Promise<RunResult>((resolve) => {
       const proc = spawn('claude', args, {
@@ -58,7 +60,7 @@ export class Executor {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
-      this.currentProcess = proc;
+      this.processes.set(taskId, proc);
       let timedOut = false;
       let killTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -66,7 +68,7 @@ export class Executor {
         timedOut = true;
         proc.kill('SIGTERM');
         killTimer = setTimeout(() => {
-          if (this.currentProcess === proc) {
+          if (this.processes.get(taskId) === proc) {
             proc.kill('SIGKILL');
           }
         }, 5000);
@@ -89,7 +91,7 @@ export class Executor {
       proc.on('close', (code, signal) => {
         clearTimeout(timeoutTimer);
         if (killTimer) clearTimeout(killTimer);
-        this.currentProcess = null;
+        this.processes.delete(taskId);
         resolve({
           exitCode: code ?? (signal ? 128 : 1),
           timedOut,
@@ -98,9 +100,21 @@ export class Executor {
     });
   }
 
+  killTask(taskId: string): void {
+    const proc = this.processes.get(taskId);
+    if (proc) {
+      proc.kill('SIGTERM');
+    }
+  }
+
   kill(): void {
-    if (this.currentProcess) {
-      this.currentProcess.kill('SIGTERM');
+    for (const [taskId, proc] of this.processes) {
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        if (this.processes.has(taskId)) {
+          proc.kill('SIGKILL');
+        }
+      }, 5000);
     }
   }
 }

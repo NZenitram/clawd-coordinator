@@ -6,26 +6,37 @@ import {
   type AnyMessage,
 } from '../protocol/messages.js';
 
-export function connectCli(coordinatorUrl: string, token: string): Promise<WebSocket> {
+export function connectCli(coordinatorUrl: string, token: string, timeoutMs = 10000): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`${coordinatorUrl}/cli`, { headers: { 'authorization': `Bearer ${token}` } });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error(`Connection timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    ws.on('open', () => { clearTimeout(timer); resolve(ws); });
+    ws.on('error', (err) => { clearTimeout(timer); reject(err); });
   });
 }
 
 export function sendRequest(
   ws: WebSocket,
   command: string,
-  args?: Record<string, unknown>
+  args?: Record<string, unknown>,
+  timeoutMs = 30000
 ): Promise<AnyMessage> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const msg = createCliRequest({ command, args });
     const requestId = msg.id;
+
+    const timer = setTimeout(() => {
+      ws.off('message', handler);
+      reject(new Error(`Request '${command}' timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
     const handler = (raw: WebSocket.RawData) => {
       const parsed = parseMessage(raw.toString());
       if (parsed && parsed.type === 'cli:response' && parsed.payload.requestId === requestId) {
+        clearTimeout(timer);
         ws.off('message', handler);
         resolve(parsed);
       }

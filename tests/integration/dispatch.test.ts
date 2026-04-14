@@ -112,6 +112,47 @@ describe('End-to-end dispatch', () => {
     cliWs.close();
   });
 
+  it('dispatches multiple tasks to agent with maxConcurrent > 1', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+        headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+      });
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+    agentWs.send(serializeMessage(createAgentRegister({
+      name: 'multi-agent',
+      os: 'linux',
+      arch: 'x64',
+      maxConcurrent: 3,
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Agent completes tasks immediately
+    agentWs.on('message', (raw) => {
+      const msg = parseMessage(raw.toString());
+      if (!msg || msg.type !== 'task:dispatch') return;
+      agentWs.send(serializeMessage(createTaskComplete({ taskId: msg.payload.taskId })));
+    });
+
+    const cliWs = await connectCli(`ws://localhost:${TEST_PORT}`, TEST_TOKEN);
+
+    // Dispatch 3 tasks — all should succeed
+    const r1 = await sendRequest(cliWs, 'dispatch-task', { agentName: 'multi-agent', prompt: 'task 1' });
+    const r2 = await sendRequest(cliWs, 'dispatch-task', { agentName: 'multi-agent', prompt: 'task 2' });
+    const r3 = await sendRequest(cliWs, 'dispatch-task', { agentName: 'multi-agent', prompt: 'task 3' });
+
+    expect((r1.payload as any).data.taskId).toBeDefined();
+    expect((r2.payload as any).data.taskId).toBeDefined();
+    expect((r3.payload as any).data.taskId).toBeDefined();
+
+    agentWs.close();
+    cliWs.close();
+  });
+
   it('returns error when agent is busy', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();
@@ -147,7 +188,7 @@ describe('End-to-end dispatch', () => {
       agentName: 'busy-agent',
       prompt: 'task 2',
     });
-    expect((second.payload as any).error).toContain('busy');
+    expect((second.payload as any).error).toContain('capacity');
 
     agentWs.close();
     cliWs.close();

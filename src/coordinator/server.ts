@@ -105,12 +105,12 @@ export class Coordinator {
         }
         const deadBusy = this.registry.getDeadBusyAgents(300000); // 5 min
         for (const agent of deadBusy) {
-          if (agent.currentTaskId) {
-            this.tasks.setError(agent.currentTaskId, 'Agent became unresponsive');
-            const subs = this.taskSubscribers.get(agent.currentTaskId);
+          for (const taskId of agent.currentTaskIds) {
+            this.tasks.setError(taskId, 'Agent became unresponsive');
+            const subs = this.taskSubscribers.get(taskId);
             if (subs) {
               const errMsg = serializeMessage(createTaskError({
-                taskId: agent.currentTaskId,
+                taskId,
                 error: 'Agent became unresponsive',
               }));
               for (const cli of subs) {
@@ -118,7 +118,7 @@ export class Coordinator {
                   cli.send(errMsg);
                 }
               }
-              this.taskSubscribers.delete(agent.currentTaskId);
+              this.taskSubscribers.delete(taskId);
             }
           }
           const socket = this.agentSockets.get(agent.name);
@@ -135,6 +135,11 @@ export class Coordinator {
         for (const taskId of this.taskOwners.keys()) {
           if (!this.tasks.get(taskId)) {
             this.taskOwners.delete(taskId);
+          }
+        }
+        for (const taskId of this.taskSubscribers.keys()) {
+          if (!this.tasks.get(taskId)) {
+            this.taskSubscribers.delete(taskId);
           }
         }
       }, 60000);
@@ -202,6 +207,12 @@ export class Coordinator {
       switch (msg.type) {
         case 'agent:register': {
           const requestedName = msg.payload.name;
+          // Validate agent name format
+          if (typeof requestedName !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(requestedName)) {
+            logger.warn({ agent: requestedName }, 'Invalid agent name format');
+            ws.close(4004, 'Invalid agent name format');
+            return;
+          }
           // Reject if agent name is already in use by a live connection
           const existingSocket = this.agentSockets.get(requestedName);
           if (existingSocket && existingSocket !== ws && existingSocket.readyState === WebSocket.OPEN) {
@@ -212,10 +223,19 @@ export class Coordinator {
           if (this.registry.get(requestedName)) {
             this.registry.unregister(requestedName);
           }
+          const rawMax = msg.payload.maxConcurrent;
+          const maxConcurrent = (typeof rawMax === 'number' && Number.isInteger(rawMax) && rawMax >= 1 && rawMax <= 32) ? rawMax : 1;
           this.registry.register(requestedName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
+            maxConcurrent,
           });
+          if (msg.payload.health) {
+            this.registry.updateHealth(requestedName, {
+              claudeAvailable: msg.payload.health.claudeAvailable,
+              version: msg.payload.health.version,
+            });
+          }
           this.agentSockets.set(requestedName, ws);
           agentName = requestedName;
           logger.info({ agent: agentName, os: msg.payload.os, arch: msg.payload.arch }, 'Agent registered');
@@ -224,6 +244,12 @@ export class Coordinator {
         case 'agent:heartbeat': {
           if (agentName) {
             this.registry.heartbeat(agentName);
+            if (msg.payload.health) {
+              this.registry.updateHealth(agentName, {
+                claudeAvailable: msg.payload.health.claudeAvailable,
+                version: msg.payload.health.version,
+              });
+            }
           }
           break;
         }
@@ -250,7 +276,7 @@ export class Coordinator {
           logger.info({ taskId }, 'Task completed');
           this.tasks.setCompleted(taskId);
           if (agentName) {
-            this.registry.setIdle(agentName);
+            this.registry.removeTask(agentName, taskId);
           }
           const subs = this.taskSubscribers.get(taskId);
           if (subs) {
@@ -271,7 +297,7 @@ export class Coordinator {
           logger.error({ taskId, error }, 'Task failed');
           this.tasks.setError(taskId, error);
           if (agentName) {
-            this.registry.setIdle(agentName);
+            this.registry.removeTask(agentName, taskId);
           }
           const errSubs = this.taskSubscribers.get(taskId);
           if (errSubs) {
@@ -291,21 +317,22 @@ export class Coordinator {
     ws.on('close', () => {
       if (agentName) {
         const agent = this.registry.get(agentName);
-        if (agent && agent.status === 'busy' && agent.currentTaskId) {
-          const taskId = agent.currentTaskId;
-          this.tasks.setError(taskId, 'Agent disconnected while task was running');
-          const subs = this.taskSubscribers.get(taskId);
-          if (subs) {
-            const errMsg = serializeMessage(createTaskError({
-              taskId,
-              error: 'Agent disconnected while task was running',
-            }));
-            for (const cli of subs) {
-              if (cli.readyState === WebSocket.OPEN) {
-                cli.send(errMsg);
+        if (agent && agent.currentTaskIds.length > 0) {
+          for (const taskId of agent.currentTaskIds) {
+            this.tasks.setError(taskId, 'Agent disconnected while task was running');
+            const subs = this.taskSubscribers.get(taskId);
+            if (subs) {
+              const errMsg = serializeMessage(createTaskError({
+                taskId,
+                error: 'Agent disconnected while task was running',
+              }));
+              for (const cli of subs) {
+                if (cli.readyState === WebSocket.OPEN) {
+                  cli.send(errMsg);
+                }
               }
+              this.taskSubscribers.delete(taskId);
             }
-            this.taskSubscribers.delete(taskId);
           }
         }
         logger.info({ agent: agentName }, 'Agent disconnected');
@@ -397,16 +424,21 @@ export class Coordinator {
           this.sendError(ws, requestId, `Agent "${agentName}" not found`);
           return;
         }
-        if (agent.status === 'busy') {
-          this.sendError(ws, requestId, `Agent "${agentName}" is busy with task ${agent.currentTaskId}`);
+        if (agent.health && !agent.health.claudeAvailable) {
+          this.sendError(ws, requestId, `Agent "${agentName}" is unhealthy: Claude CLI not available`);
           return;
         }
 
         const traceId = randomUUID();
-        const maxBudgetUsd = typeof args?.maxBudgetUsd === 'number' ? args.maxBudgetUsd : undefined;
+        const rawBudget = args?.maxBudgetUsd;
+        const maxBudgetUsd = (typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 && rawBudget <= 10000) ? rawBudget : undefined;
         const task = this.tasks.create({ agentName, prompt, sessionId, traceId });
         this.tasks.setRunning(task.id);
-        this.registry.setBusy(agentName, task.id);
+        if (!this.registry.tryAddTask(agentName, task.id)) {
+          this.tasks.setError(task.id, 'Agent at capacity');
+          this.sendError(ws, requestId, `Agent "${agentName}" is at capacity (${agent.currentTaskIds.length}/${agent.maxConcurrent} tasks)`);
+          return;
+        }
         this.taskOwners.set(task.id, ws);
         logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
 
@@ -424,6 +456,12 @@ export class Coordinator {
             traceId,
             maxBudgetUsd,
           })));
+        } else {
+          logger.error({ agent: agentName, taskId: task.id, traceId }, 'Agent socket not open, dispatch not delivered');
+          this.tasks.setError(task.id, 'Agent socket not open at dispatch time');
+          this.registry.removeTask(agentName, task.id);
+          this.sendError(ws, requestId, `Agent "${agentName}" is not reachable`);
+          return;
         }
 
         ws.send(serializeMessage(createCliResponse({

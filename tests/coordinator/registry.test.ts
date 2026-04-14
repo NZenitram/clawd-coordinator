@@ -16,6 +16,14 @@ describe('AgentRegistry', () => {
     expect(agents[0].status).toBe('idle');
     expect(agents[0].os).toBe('linux');
     expect(agents[0].arch).toBe('x64');
+    expect(agents[0].maxConcurrent).toBe(1);
+    expect(agents[0].currentTaskIds).toEqual([]);
+  });
+
+  it('registers an agent with custom maxConcurrent', () => {
+    registry.register('big-box', { os: 'linux', arch: 'x64', maxConcurrent: 4 });
+    const agent = registry.get('big-box')!;
+    expect(agent.maxConcurrent).toBe(4);
   });
 
   it('rejects duplicate agent names', () => {
@@ -49,39 +57,87 @@ describe('AgentRegistry', () => {
     expect(after).toBeGreaterThanOrEqual(before);
   });
 
-  it('sets agent status to busy with task ID', () => {
+  it('adds a task and transitions to busy (maxConcurrent=1)', () => {
     registry.register('staging-box', { os: 'linux', arch: 'x64' });
-    registry.setBusy('staging-box', 'task-1');
+    registry.tryAddTask('staging-box', 'task-1');
     const agent = registry.get('staging-box')!;
     expect(agent.status).toBe('busy');
-    expect(agent.currentTaskId).toBe('task-1');
+    expect(agent.currentTaskIds).toEqual(['task-1']);
   });
 
-  it('sets agent status back to idle', () => {
+  it('removes a task and transitions back to idle', () => {
     registry.register('staging-box', { os: 'linux', arch: 'x64' });
-    registry.setBusy('staging-box', 'task-1');
-    registry.setIdle('staging-box');
+    registry.tryAddTask('staging-box', 'task-1');
+    registry.removeTask('staging-box', 'task-1');
     const agent = registry.get('staging-box')!;
     expect(agent.status).toBe('idle');
-    expect(agent.currentTaskId).toBeUndefined();
+    expect(agent.currentTaskIds).toEqual([]);
+  });
+
+  it('tracks multiple concurrent tasks per agent', () => {
+    registry.register('multi-agent', { os: 'linux', arch: 'x64', maxConcurrent: 3 });
+    registry.tryAddTask('multi-agent', 'task-1');
+    registry.tryAddTask('multi-agent', 'task-2');
+    const agent = registry.get('multi-agent')!;
+    expect(agent.currentTaskIds).toEqual(['task-1', 'task-2']);
+    expect(agent.status).toBe('active'); // has capacity
+    registry.tryAddTask('multi-agent', 'task-3');
+    expect(registry.get('multi-agent')!.status).toBe('busy'); // at capacity
+  });
+
+  it('hasCapacity returns true when agent has room', () => {
+    registry.register('cap-agent', { os: 'linux', arch: 'x64', maxConcurrent: 2 });
+    expect(registry.hasCapacity('cap-agent')).toBe(true);
+    registry.tryAddTask('cap-agent', 'task-1');
+    expect(registry.hasCapacity('cap-agent')).toBe(true);
+    registry.tryAddTask('cap-agent', 'task-2');
+    expect(registry.hasCapacity('cap-agent')).toBe(false);
+  });
+
+  it('hasCapacity returns false for unknown agent', () => {
+    expect(registry.hasCapacity('ghost')).toBe(false);
+  });
+
+  it('tryAddTask atomically checks and claims capacity', () => {
+    registry.register('atomic-agent', { os: 'linux', arch: 'x64', maxConcurrent: 2 });
+    expect(registry.tryAddTask('atomic-agent', 'task-1')).toBe(true);
+    expect(registry.tryAddTask('atomic-agent', 'task-2')).toBe(true);
+    expect(registry.tryAddTask('atomic-agent', 'task-3')).toBe(false); // at capacity
+    expect(registry.get('atomic-agent')!.currentTaskIds).toEqual(['task-1', 'task-2']);
+  });
+
+  it('tryAddTask returns false for unknown agent', () => {
+    expect(registry.tryAddTask('ghost', 'task-1')).toBe(false);
+  });
+
+  it('updates agent health status', () => {
+    registry.register('health-agent', { os: 'linux', arch: 'x64' });
+    expect(registry.get('health-agent')!.health).toBeUndefined();
+
+    registry.updateHealth('health-agent', { claudeAvailable: true, version: 'claude 1.0.0' });
+    const agent = registry.get('health-agent')!;
+    expect(agent.health?.claudeAvailable).toBe(true);
+    expect(agent.health?.version).toBe('claude 1.0.0');
+
+    registry.updateHealth('health-agent', { claudeAvailable: false });
+    expect(registry.get('health-agent')!.health?.claudeAvailable).toBe(false);
   });
 
   it('detects stale agents based on heartbeat threshold', () => {
     registry.register('fresh-agent', { os: 'linux', arch: 'x64' });
     registry.register('stale-agent', { os: 'linux', arch: 'x64' });
 
-    // Manually backdate the stale agent's heartbeat
     const stale = registry.get('stale-agent')!;
-    stale.lastHeartbeat = Date.now() - 120000; // 2 minutes ago
+    stale.lastHeartbeat = Date.now() - 120000;
 
-    const staleAgents = registry.getStaleAgents(90000); // 90s threshold
+    const staleAgents = registry.getStaleAgents(90000);
     expect(staleAgents).toHaveLength(1);
     expect(staleAgents[0].name).toBe('stale-agent');
   });
 
   it('detects dead busy agents', () => {
     registry.register('working-agent', { os: 'linux', arch: 'x64' });
-    registry.setBusy('working-agent', 'task-1');
+    registry.tryAddTask('working-agent', 'task-1');
     const agent = registry.get('working-agent')!;
     agent.lastHeartbeat = Date.now() - 600000;
 
@@ -92,7 +148,7 @@ describe('AgentRegistry', () => {
 
   it('does not flag recently active busy agents', () => {
     registry.register('active-agent', { os: 'linux', arch: 'x64' });
-    registry.setBusy('active-agent', 'task-1');
+    registry.tryAddTask('active-agent', 'task-1');
 
     const dead = registry.getDeadBusyAgents(300000);
     expect(dead).toHaveLength(0);
@@ -100,7 +156,7 @@ describe('AgentRegistry', () => {
 
   it('excludes busy agents from staleness check', () => {
     registry.register('busy-agent', { os: 'linux', arch: 'x64' });
-    registry.setBusy('busy-agent', 'task-1');
+    registry.tryAddTask('busy-agent', 'task-1');
 
     const agent = registry.get('busy-agent')!;
     agent.lastHeartbeat = Date.now() - 120000;

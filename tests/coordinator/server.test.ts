@@ -245,6 +245,33 @@ describe('Coordinator', () => {
     cli2.close();
   });
 
+  it('refuses dispatch to unhealthy agent', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = await connectWs('/agent');
+    // Register with health indicating Claude is unavailable
+    const registerMsg = createAgentRegister({
+      name: 'sick-agent',
+      os: 'linux',
+      arch: 'x64',
+      health: { claudeAvailable: false },
+    });
+    agentWs.send(serializeMessage(registerMsg));
+    await new Promise(r => setTimeout(r, 50));
+
+    const cli = await connectWs('/cli');
+    const response = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'sick-agent', prompt: 'test' } }))
+    );
+    const parsed = parseMessage(response);
+    expect((parsed!.payload as any).error).toContain('unhealthy');
+
+    agentWs.close();
+    cli.close();
+  });
+
   it('prevents second CLI from getting another CLIs task', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();

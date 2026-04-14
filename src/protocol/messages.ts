@@ -5,20 +5,29 @@ import { randomUUID } from 'node:crypto';
 export interface Message<T extends string, P> {
   id: string;
   type: T;
+  version: number;
   timestamp: number;
   payload: P;
 }
 
 // --- Payload types ---
 
+export interface AgentHealthPayload {
+  claudeAvailable: boolean;
+  version?: string;
+}
+
 export interface AgentRegisterPayload {
   name: string;
   os: string;
   arch: string;
+  maxConcurrent?: number;
+  health?: AgentHealthPayload;
 }
 
 export interface AgentHeartbeatPayload {
   name: string;
+  health?: AgentHealthPayload;
 }
 
 export interface TaskDispatchPayload {
@@ -84,6 +93,7 @@ function makeMessage<T extends string, P>(type: T, payload: P): Message<T, P> {
   return {
     id: randomUUID(),
     type,
+    version: 1,
     timestamp: Date.now(),
     payload,
   };
@@ -162,6 +172,7 @@ export function parseMessage(raw: string): AnyMessage | null {
     if (typeof parsed !== 'object' || parsed === null) return null;
     if (typeof parsed.id !== 'string') return null;
     if (typeof parsed.type !== 'string' || !VALID_TYPES.has(parsed.type)) return null;
+    if (parsed.version !== undefined && typeof parsed.version !== 'number') return null;
     if (typeof parsed.timestamp !== 'number') return null;
     if (typeof parsed.payload !== 'object' || parsed.payload === null) return null;
     return parsed as AnyMessage;
