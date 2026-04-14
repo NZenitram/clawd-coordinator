@@ -20,6 +20,7 @@ export class Executor {
   async run(options: RunOptions): Promise<RunResult> {
     const args = [
       '-p',
+      '--verbose',
       '--output-format', 'stream-json',
       options.prompt,
     ];

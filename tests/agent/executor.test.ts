@@ -46,7 +46,7 @@ describe('Executor', () => {
     expect(output.length).toBeGreaterThan(0);
     expect(spawn).toHaveBeenCalledWith(
       'claude',
-      ['-p', '--output-format', 'stream-json', 'say hello'],
+      ['-p', '--verbose', '--output-format', 'stream-json', 'say hello'],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] })
     );
   });
@@ -92,7 +92,7 @@ describe('Executor', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       'claude',
-      ['--resume', 'session-123', '-p', '--output-format', 'stream-json', 'continue work'],
+      ['--resume', 'session-123', '-p', '--verbose', '--output-format', 'stream-json', 'continue work'],
       expect.any(Object)
     );
   });

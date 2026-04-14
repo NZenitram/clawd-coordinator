@@ -83,6 +83,14 @@ export class Coordinator {
       switch (msg.type) {
         case 'agent:register': {
           agentName = msg.payload.name;
+          // If agent already exists, close the old socket and replace
+          const existingSocket = this.agentSockets.get(agentName);
+          if (existingSocket && existingSocket !== ws) {
+            existingSocket.close();
+          }
+          if (this.registry.get(agentName)) {
+            this.registry.unregister(agentName);
+          }
           this.registry.register(agentName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
