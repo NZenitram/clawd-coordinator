@@ -8,6 +8,7 @@ import { agentsCommand } from './commands/agents.js';
 import { runCommand } from './commands/run.js';
 import { fanOutCommand } from './commands/fan-out.js';
 import { tasksListCommand, attachCommand, resultCommand } from './commands/tasks.js';
+import { mcpCommand } from './commands/mcp.js';
 
 const program = new Command();
 
@@ -25,5 +26,6 @@ program.addCommand(fanOutCommand);
 program.addCommand(tasksListCommand);
 program.addCommand(attachCommand);
 program.addCommand(resultCommand);
+program.addCommand(mcpCommand);
 
 program.parse();
