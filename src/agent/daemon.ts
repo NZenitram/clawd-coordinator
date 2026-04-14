@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
+import { createIsolationStrategy, type IsolationMode, type IsolationStrategy } from './isolation.js';
 import { logger } from '../shared/logger.js';
 import {
   parseMessage,
@@ -24,6 +25,7 @@ export interface AgentDaemonOptions {
   taskTimeoutMs?: number;
   dangerouslySkipPermissions?: boolean;
   maxConcurrent?: number;
+  isolation?: IsolationMode;
 }
 
 export class AgentDaemon {
@@ -37,10 +39,12 @@ export class AgentDaemon {
   private options: AgentDaemonOptions;
   private lastHealth: { claudeAvailable: boolean; version?: string } = { claudeAvailable: false };
   private runningTaskCount = 0;
+  private isolationStrategy: IsolationStrategy;
 
   constructor(options: AgentDaemonOptions) {
     this.options = options;
     this.reconnectDelay = options.reconnectDelayMs ?? 1000;
+    this.isolationStrategy = createIsolationStrategy(options.isolation ?? 'none');
   }
 
   async start(): Promise<void> {
@@ -198,12 +202,27 @@ export class AgentDaemon {
     const stderrChunks: string[] = [];
     const MAX_STDERR_BYTES = 1024 * 1024; // 1MB cap
     let stderrBytes = 0;
+    const baseDir = this.options.workingDirectory ?? process.cwd();
+    let workingDirectory: string;
+    try {
+      workingDirectory = await this.isolationStrategy.setup(taskId, baseDir);
+    } catch (err) {
+      logger.error({ taskId, traceId, error: err instanceof Error ? err.message : String(err) }, 'Isolation setup failed');
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeMessage(createTaskError({
+          taskId,
+          error: `Isolation setup failed: ${err instanceof Error ? err.message : String(err)}`,
+          traceId,
+        })));
+      }
+      return;
+    }
     try {
       const result = await this.executor.run({
         prompt,
         taskId,
         sessionId,
-        workingDirectory: this.options.workingDirectory,
+        workingDirectory,
         timeoutMs: this.options.taskTimeoutMs,
         dangerouslySkipPermissions: this.options.dangerouslySkipPermissions,
         maxBudgetUsd,
@@ -250,6 +269,10 @@ export class AgentDaemon {
           traceId,
         })));
       }
+    } finally {
+      await this.isolationStrategy.cleanup(taskId).catch((err) => {
+        logger.warn({ taskId, error: err instanceof Error ? err.message : String(err) }, 'Isolation cleanup failed');
+      });
     }
   }
 }

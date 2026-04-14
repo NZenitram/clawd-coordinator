@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { AgentDaemon } from '../../agent/daemon.js';
+import type { IsolationMode } from '../../agent/isolation.js';
 
 export const agentCommand = new Command('agent')
   .description('Start the remote agent daemon')
@@ -9,7 +10,8 @@ export const agentCommand = new Command('agent')
   .option('--cwd <directory>', 'Working directory for Claude Code')
   .option('--dangerously-skip-permissions', 'Skip Claude permission prompts for headless use')
   .option('--max-concurrent <n>', 'Maximum concurrent tasks (default: 1)', '1')
-  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean; maxConcurrent?: string }) => {
+  .option('--isolation <none|worktree|tmpdir>', 'Per-task workspace isolation strategy (default: none)', 'none')
+  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean; maxConcurrent?: string; isolation?: string }) => {
     const daemon = new AgentDaemon({
       name: options.name,
       coordinatorUrl: options.url,
@@ -17,6 +19,7 @@ export const agentCommand = new Command('agent')
       workingDirectory: options.cwd,
       dangerouslySkipPermissions: options.dangerouslySkipPermissions,
       maxConcurrent: options.maxConcurrent ? parseInt(options.maxConcurrent, 10) : undefined,
+      isolation: (options.isolation ?? 'none') as IsolationMode,
     });
 
     try {
