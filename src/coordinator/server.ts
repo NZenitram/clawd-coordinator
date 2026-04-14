@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { IncomingMessage } from 'node:http';
+import { createServer as createHttpServer, IncomingMessage, Server as HttpServer } from 'node:http';
 import { createServer as createHttpsServer, Server as HttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,7 @@ import { logger } from '../shared/logger.js';
 import { TaskTracker, type TaskStore, type TaskStatus } from './tasks.js';
 import { InMemoryTaskQueue, type TaskQueue } from './queue.js';
 import { validateToken, validateAgentToken } from '../shared/auth.js';
+import { createRestHandler } from './rest.js';
 import {
   parseMessage,
   serializeMessage,
@@ -37,6 +38,8 @@ export interface CoordinatorOptions {
 export class Coordinator {
   private wss: WebSocketServer | null = null;
   private httpsServer: HttpsServer | null = null;
+  private httpServer: HttpServer | null = null;
+  private httpConnections = new Set<import('node:net').Socket>();
   private registry = new AgentRegistry();
   private tasks: TaskStore;
   private agentSockets = new Map<string, WebSocket>();
@@ -66,18 +69,29 @@ export class Coordinator {
         cb(false, 401, 'Unauthorized');
       };
 
+      const restHandler = createRestHandler({
+        store: this.tasks,
+        registry: this.registry,
+        token: this.options.token,
+      });
+
       if (this.options.tls) {
         const httpsServer = createHttpsServer({
           cert: readFileSync(this.options.tls.cert),
           key: readFileSync(this.options.tls.key),
-        });
+        }, restHandler);
         this.httpsServer = httpsServer;
         this.wss = new WebSocketServer({ server: httpsServer, maxPayload: 1 * 1024 * 1024, verifyClient });
         httpsServer.listen(this.options.port, () => resolve());
       } else {
-        this.wss = new WebSocketServer({ port: this.options.port, maxPayload: 1 * 1024 * 1024, verifyClient }, () => {
-          resolve();
+        const httpServer = createHttpServer(restHandler);
+        this.httpServer = httpServer;
+        httpServer.on('connection', (socket) => {
+          this.httpConnections.add(socket);
+          socket.on('close', () => this.httpConnections.delete(socket));
         });
+        this.wss = new WebSocketServer({ server: httpServer, maxPayload: 1 * 1024 * 1024, verifyClient });
+        httpServer.listen(this.options.port, () => resolve());
       }
       logger.info({ port: this.options.port }, 'Coordinator started');
       this.wss.on('connection', (ws, req) => {
@@ -177,6 +191,13 @@ export class Coordinator {
         if (this.httpsServer) {
           this.httpsServer.close(() => resolve());
           this.httpsServer = null;
+        } else if (this.httpServer) {
+          for (const socket of this.httpConnections) {
+            socket.destroy();
+          }
+          this.httpConnections.clear();
+          this.httpServer.close(() => resolve());
+          this.httpServer = null;
         } else {
           resolve();
         }
