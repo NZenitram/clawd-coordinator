@@ -1,5 +1,7 @@
 import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
 import { logger } from '../shared/logger.js';
@@ -11,7 +13,11 @@ import {
   createTaskOutput,
   createTaskComplete,
   createTaskError,
+  createSessionListResponse,
+  type SessionInfo,
 } from '../protocol/messages.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface AgentDaemonOptions {
   name: string;
@@ -162,6 +168,9 @@ export class AgentDaemon {
           this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd).finally(() => {
             this.runningTaskCount--;
           });
+        } else if (msg.type === 'session:list-request') {
+          const { agentName, requestId } = msg.payload as { agentName: string; requestId: string };
+          this.handleSessionListRequest(agentName, requestId);
         }
       });
 
@@ -192,6 +201,45 @@ export class AgentDaemon {
       });
     }, this.reconnectDelay);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, maxDelay);
+  }
+
+  private async handleSessionListRequest(agentName: string, requestId: string): Promise<void> {
+    logger.info({ agentName }, 'Session list requested');
+    try {
+      const { stdout } = await execFileAsync('claude', ['sessions', 'list', '--output', 'json'], {
+        timeout: 15000,
+      });
+      let sessions: SessionInfo[] = [];
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        if (Array.isArray(parsed)) {
+          sessions = parsed.map((s: Record<string, unknown>) => ({
+            id: String(s['id'] ?? ''),
+            name: typeof s['name'] === 'string' ? s['name'] : undefined,
+            createdAt: typeof s['createdAt'] === 'string' ? s['createdAt'] : undefined,
+          }));
+        }
+      } catch {
+        // stdout wasn't JSON — treat as empty list
+      }
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeMessage(createSessionListResponse({
+          agentName,
+          sessions,
+          requestId,
+        })));
+      }
+    } catch (err) {
+      logger.warn({ error: err instanceof Error ? err.message : String(err) }, 'Session list command failed');
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeMessage(createSessionListResponse({
+          agentName,
+          sessions: [],
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        })));
+      }
+    }
   }
 
   private async handleTask(taskId: string, prompt: string, sessionId: string | undefined, traceId?: string, maxBudgetUsd?: number): Promise<void> {
