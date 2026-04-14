@@ -3,6 +3,7 @@
 import { Command } from 'commander';
 import { initCommand } from './commands/init.js';
 import { serveCommand } from './commands/serve.js';
+import { agentCommand } from './commands/agent.js';
 
 const program = new Command();
 
@@ -13,5 +14,6 @@ program
 
 program.addCommand(initCommand);
 program.addCommand(serveCommand);
+program.addCommand(agentCommand);
 
 program.parse();
