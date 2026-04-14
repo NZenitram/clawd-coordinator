@@ -1,4 +1,4 @@
-# Coordination
+# Clawd Coordinator
 
 CLI tool for orchestrating remote Claude Code sessions across machines via WebSocket.
 

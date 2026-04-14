@@ -1,5 +1,5 @@
 {
-  "name": "coordination",
+  "name": "clawd-coordinator",
   "version": "0.1.0",
   "description": "Orchestrate remote Claude Code sessions across machines",
   "type": "module",
