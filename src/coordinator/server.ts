@@ -16,6 +16,7 @@ import {
   createTaskDispatch,
   createTaskError,
   createCliResponse,
+  createSessionListRequest,
   MessageDeduplicator,
   type AnyMessage,
 } from '../protocol/messages.js';
@@ -50,6 +51,8 @@ export class Coordinator {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private dedup = new MessageDeduplicator();
   private taskOwners = new Map<string, WebSocket>();
+  /** Maps session-list requestId → { cliSocket, cliRequestId } */
+  private sessionListPending = new Map<string, { cliSocket: WebSocket; cliRequestId: string }>();
   private queue: TaskQueue;
   private options: CoordinatorOptions;
 
@@ -341,6 +344,21 @@ export class Coordinator {
           }
           break;
         }
+        case 'session:list-response': {
+          const { requestId, sessions, error } = msg.payload;
+          const pending = this.sessionListPending.get(requestId);
+          if (!pending) break;
+          this.sessionListPending.delete(requestId);
+          const { cliSocket, cliRequestId } = pending;
+          if (cliSocket.readyState === WebSocket.OPEN) {
+            cliSocket.send(serializeMessage(createCliResponse({
+              requestId: cliRequestId,
+              data: { sessions },
+              error,
+            })));
+          }
+          break;
+        }
       }
     });
 
@@ -396,6 +414,11 @@ export class Coordinator {
       for (const [taskId, owner] of this.taskOwners) {
         if (owner === ws) {
           this.taskOwners.delete(taskId);
+        }
+      }
+      for (const [reqId, pending] of this.sessionListPending) {
+        if (pending.cliSocket === ws) {
+          this.sessionListPending.delete(reqId);
         }
       }
     });
@@ -586,6 +609,30 @@ export class Coordinator {
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { subscribed: true, taskId },
+        })));
+        break;
+      }
+      case 'list-sessions': {
+        const agentName = this.requireStringArg(args, 'agentName');
+        if (!agentName) {
+          this.sendError(ws, requestId, 'Missing required argument: agentName');
+          return;
+        }
+        const agent = this.registry.get(agentName);
+        if (!agent) {
+          this.sendError(ws, requestId, `Agent "${agentName}" not found`);
+          return;
+        }
+        const agentWs = this.agentSockets.get(agentName);
+        if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Agent "${agentName}" is not reachable`);
+          return;
+        }
+        // Use requestId as the correlation key so we can route the response back
+        this.sessionListPending.set(requestId, { cliSocket: ws, cliRequestId: requestId });
+        agentWs.send(serializeMessage(createSessionListRequest({
+          agentName,
+          requestId,
         })));
         break;
       }

@@ -66,6 +66,25 @@ export interface CliResponsePayload {
   error?: string;
 }
 
+export interface SessionInfo {
+  id: string;
+  name?: string;
+  createdAt?: string;
+}
+
+export interface SessionListRequestPayload {
+  agentName: string;
+  /** correlates request to response across the coordinator relay */
+  requestId: string;
+}
+
+export interface SessionListResponsePayload {
+  agentName: string;
+  sessions: SessionInfo[];
+  requestId: string;
+  error?: string;
+}
+
 // --- Concrete message types ---
 
 export type AgentRegister = Message<'agent:register', AgentRegisterPayload>;
@@ -76,6 +95,8 @@ export type TaskComplete = Message<'task:complete', TaskCompletePayload>;
 export type TaskError = Message<'task:error', TaskErrorPayload>;
 export type CliRequest = Message<'cli:request', CliRequestPayload>;
 export type CliResponse = Message<'cli:response', CliResponsePayload>;
+export type SessionListRequest = Message<'session:list-request', SessionListRequestPayload>;
+export type SessionListResponse = Message<'session:list-response', SessionListResponsePayload>;
 
 export type AnyMessage =
   | AgentRegister
@@ -85,7 +106,9 @@ export type AnyMessage =
   | TaskComplete
   | TaskError
   | CliRequest
-  | CliResponse;
+  | CliResponse
+  | SessionListRequest
+  | SessionListResponse;
 
 // --- Factory functions ---
 
@@ -131,6 +154,14 @@ export function createCliResponse(payload: CliResponsePayload): CliResponse {
   return makeMessage('cli:response', payload);
 }
 
+export function createSessionListRequest(payload: SessionListRequestPayload): SessionListRequest {
+  return makeMessage('session:list-request', payload);
+}
+
+export function createSessionListResponse(payload: SessionListResponsePayload): SessionListResponse {
+  return makeMessage('session:list-response', payload);
+}
+
 // --- Serialization ---
 
 export function serializeMessage(msg: AnyMessage): string {
@@ -164,6 +195,7 @@ const VALID_TYPES = new Set([
   'agent:register', 'agent:heartbeat',
   'task:dispatch', 'task:output', 'task:complete', 'task:error',
   'cli:request', 'cli:response',
+  'session:list-request', 'session:list-response',
 ]);
 
 export function parseMessage(raw: string): AnyMessage | null {
