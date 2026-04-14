@@ -10,7 +10,7 @@ import {
 import { connectCli, sendRequest } from '../../src/cli/output.js';
 
 const TEST_TOKEN = 'sessions-test-token';
-const TEST_PORT = 9880;
+const TEST_PORT = 9881;
 
 describe('Session discovery', () => {
   let coordinator: Coordinator;
