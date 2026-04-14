@@ -125,6 +125,46 @@ coord agents
 
 Should list all connected agents with their status, platform, and uptime.
 
+## Coordinator Configuration
+
+### Storage Backend
+
+**Default (in-memory):**
+```bash
+coord serve -p 8080
+# All state lost on restart
+```
+
+**SQLite (persistent):**
+```bash
+coord serve -p 8080 --storage sqlite --db-path ~/.coord/tasks.db
+```
+
+On restart, incomplete running tasks are automatically recovered and retried. Completed and error tasks remain in the database for audit trails and troubleshooting.
+
+### Per-Agent Configuration
+
+**Maximum concurrent tasks:**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name my-agent --max-concurrent 4
+```
+
+Agents reject new tasks if they exceed this limit (unless a task queue is enabled). Default is 1.
+
+**Workspace isolation:**
+```bash
+# No isolation (fastest, default)
+coord agent --url wss://host:8080 --token TOKEN --name my-agent --isolation none
+
+# Git worktrees (recommended for repositories)
+coord agent --url wss://host:8080 --token TOKEN --name my-agent --isolation worktree
+
+# Temp directories (maximum isolation, slower)
+coord agent --url wss://host:8080 --token TOKEN --name my-agent --isolation tmpdir
+```
+
+See [Workspace Isolation](#workspace-isolation) below for detailed comparison.
+
 ## Usage
 
 ### Dispatch a task
@@ -134,6 +174,14 @@ coord run "fix the bug in src/auth.ts" --on my-agent
 ```
 
 Output streams in real-time. Use `--bg` to run in the background.
+
+### Dispatch with budget limit
+
+```bash
+coord run "analyze large file" --on my-agent --budget 2.50
+```
+
+Task will error if Claude's usage exceeds the budget.
 
 ### Fan out to multiple agents
 
@@ -147,6 +195,89 @@ coord fan-out "run the test suite and report results" --on agent-1,agent-2,agent
 coord tasks                    # list all tasks
 coord attach <task-id>         # stream output from a running task
 coord result <task-id>         # get output from a completed task
+```
+
+### Use REST API
+
+```bash
+TOKEN=$(cat ~/.coord/config.json | jq -r .token)
+
+# Dispatch via HTTP
+curl -X POST http://localhost:8080/api/dispatch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agentName": "my-agent", "prompt": "run tests"}'
+
+# List agents
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/agents
+
+# List tasks
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/tasks?status=running
+```
+
+### Use MCP Server
+
+Add to Claude Code's configuration (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "clawd-coordinator": {
+      "command": "node",
+      "args": ["/path/to/clawd-coordinator/dist/cli/index.js", "mcp", "--url", "wss://coordinator.example.ts.net"]
+    }
+  }
+}
+```
+
+Now use Claude Code naturally:
+```
+I have 3 agents connected. Run the test suite on staging and report results.
+```
+
+Claude will automatically dispatch via the MCP integration.
+
+## Workspace Isolation
+
+Each task can run in an isolated workspace on the agent machine. This prevents concurrent tasks from interfering with each other's files.
+
+### Isolation Strategies
+
+| Strategy | Description | Use Case | Tradeoff |
+|----------|-------------|----------|----------|
+| `none` | Tasks share the same working directory | Sequential tasks, no filesystem conflicts | Fastest, but tasks must not clobber files |
+| `worktree` | Each task gets a dedicated git worktree | Git repositories with concurrent tasks | Good balance; requires git repo |
+| `tmpdir` | Each task gets a copy of the working directory in `/tmp` | Any directory, maximum isolation | Slowest; copies entire directory per task |
+
+### Examples
+
+**Sequential tasks (no isolation needed):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name my-agent --isolation none
+```
+
+**Parallel tasks in a git repository:**
+```bash
+# Creates isolated git worktrees per task
+coord agent --url wss://host:8080 --token TOKEN --name my-agent \
+  --max-concurrent 4 --isolation worktree
+```
+
+Now you can safely run 4 concurrent tasks:
+```bash
+for i in {1..4}; do
+  coord run "make test" --on my-agent --bg &
+done
+wait
+```
+
+Each task runs in its own git worktree, preventing branch/file conflicts.
+
+**Maximum isolation for untrusted code:**
+```bash
+# Copies entire directory to temp location per task
+coord agent --url wss://host:8080 --token TOKEN --name my-agent \
+  --max-concurrent 2 --isolation tmpdir
 ```
 
 ## Architecture
@@ -191,3 +322,82 @@ Local Machine                          Remote Machines
 **Name conflict:**
 - Each agent name must be unique. A second agent with the same name will be rejected with code 4003
 - Server logs: `"msg":"Agent name hijack attempt rejected"`
+
+**SQLite "database is locked" error:**
+- Only one coordinator process can use the same `.db` file at a time
+- Use different `--db-path` for different coordinator instances
+- If the previous instance crashed, the lock file will remain; delete it: `rm ~/.coord/tasks.db-journal`
+
+**Tasks queued but not processing:**
+- Ensure the agent has capacity: `coord agents | grep agent-name`
+- Agent may be disconnected (shows status `disconnected`)
+- Check agent logs: `"msg":"Task received"` when work begins
+
+**Worktree isolation fails with permission errors:**
+- Ensure the agent's working directory is inside a git repository
+- The git repository must be writable by the agent process user
+- Check git status: `cd $cwd && git status` (should succeed)
+
+## Per-Agent Tokens
+
+V2 supports per-agent authentication tokens for tighter access control. Instead of a single shared token, each agent can have its own token.
+
+### Configure per-agent tokens
+
+Edit `~/.coord/config.json`:
+
+```json
+{
+  "token": "sk-shared-token",
+  "agentTokens": {
+    "staging-agent": "sk-staging-...",
+    "prod-agent": "sk-prod-...",
+    "gpu-agent": "sk-gpu-..."
+  }
+}
+```
+
+### Start agents with per-agent tokens
+
+```bash
+coord agent \
+  --url wss://host:8080 \
+  --token sk-staging-... \
+  --name staging-agent
+```
+
+The coordinator will validate the token against `agentTokens.staging-agent` in the config.
+
+### Fallback to shared token
+
+If an agent's name is not in `agentTokens`, the coordinator accepts the shared `token` for backward compatibility.
+
+## Task Queuing Behavior
+
+When agents reach max concurrency, new tasks are automatically queued and processed in FIFO order.
+
+### Example
+
+Agent with `--max-concurrent 2`:
+
+```bash
+# Dispatch 5 tasks
+for i in {1..5}; do
+  coord run "sleep 5 && echo task-$i" --on my-agent --bg
+done
+
+# Check status immediately
+coord tasks
+
+# Output:
+# task-1  running   (started immediately)
+# task-2  running   (started immediately)
+# task-3  pending   (queued)
+# task-4  pending   (queued)
+# task-5  pending   (queued)
+
+# As task-1 completes, task-3 automatically starts
+# As task-2 completes, task-4 automatically starts
+```
+
+Tasks are processed in dispatch order (FIFO). No tasks are rejected due to capacity — they queue instead.

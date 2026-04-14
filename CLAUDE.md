@@ -90,6 +90,9 @@ src/
 - Run `npm test` before committing (152 tests across 15 suites)
 - Run `npm run lint` to type-check without emitting
 - TDD: write failing test, implement, verify, commit
+- See [README.md](README.md) for user-facing documentation
+- See [docs/testing.md](docs/testing.md) for test procedures
+- See [docs/deployment.md](docs/deployment.md) for deployment guide
 
 ## CLI Commands
 
@@ -108,47 +111,47 @@ src/
 | `coord sessions --on <agent>` | List sessions (stub) |
 | `coord resume <session-id> --on <agent>` | Resume session (stub) |
 
-## V1 Limitations
+## V2 Implementation (Complete)
 
-- In-memory state only — task history lost on coordinator restart
-- Single-user, single shared token
-- No task queuing — busy agents reject new tasks immediately
-- No persistent sessions listing (sessions/resume are stubs)
-- Coordinator must be reachable by agents (Tailscale Funnel for local use)
+All 7 phases of the V2 expansion plan are complete:
+
+- [x] **Phase 1:** FATAL operational fixes (task error on agent disconnect, message validation, auth hardening)
+- [x] **Phase 2:** Protocol hardening, message deduplication, per-agent tokens, budget tracking
+- [x] **Phase 3:** Agent health checks, stale agent eviction, CLI budget enforcement
+- [x] **Phase 4:** Per-agent concurrency control (`--max-concurrent` flag)
+- [x] **Phase 5:** SQLite persistence, task queuing, stale task recovery
+- [x] **Phase 6:** Workspace isolation (`--isolation none|worktree|tmpdir`)
+- [x] **Phase 7:** REST API, MCP server, session management
+
+**Result:** 152 tests across 15 suites. Production-ready system with persistence, concurrency, isolation, and integrations.
 
 ## Security Notes
 
 - Spawned `claude` processes on remote agents inherit the full process environment. Operators should minimize sensitive env vars on agent machines or run agents in containers with restricted environments.
-- Auth uses a single shared token (V1). All agents and CLI clients share the same token. Agent names are self-reported.
-- Config file at `~/.coord/config.json` contains the auth token. File permissions are set to 0600 on creation.
+- **V1 Auth:** Single shared token. All agents and CLI clients share the same token. Agent names are self-reported.
+- **V2 Auth:** Per-agent tokens supported (optional). Agents can use unique tokens from `agentTokens` map in config. Fallback to shared token for backward compatibility.
+- Config file at `~/.coord/config.json` contains auth tokens. File permissions are set to 0600 on creation.
 - The coordinator should be run behind TLS (use `--tls-cert`/`--tls-key` or Tailscale Funnel).
+- Workspace isolation (`--isolation worktree|tmpdir`) prevents concurrent tasks from interfering with each other's files.
 
-## V2 Backlog
+## Future Backlog
 
-- MCP server for structured Claude Code tool integration
 - TUI/dashboard for visual session monitoring
 - Hosted relay service for multi-user/team use
-- Persistent task state (SQLite)
-- Task queuing when agents are busy
-- Retry/dead letter handling
+- Retry/dead letter handling for failed tasks
 - Ephemeral machine provisioning
-- User management (multi-user auth, permissions)
+- User management (multi-user auth, permissions, RBAC)
 - Cross-session communication between remote instances
+- Distributed tracing and observability
 
-## Testing
+## Documentation
 
-See [docs/testing.md](docs/testing.md) for the full testing procedures including:
-- Automated test suite (57 tests across 7 suites)
-- Manual integration test procedure (12 steps)
-- Structured logging verification checklist
+For users:
+- **[README.md](README.md)** — Project overview, quick start, CLI commands, REST API, MCP server, configuration, security
 
-## Deployment
-
-See [docs/deployment.md](docs/deployment.md) for remote deployment instructions including:
-- Install from git or npm
-- Coordinator setup with Tailscale Funnel or direct TLS
-- Agent systemd service configuration
-- Troubleshooting guide
+For developers:
+- **[docs/testing.md](docs/testing.md)** — Unit/integration test procedures, manual test steps, SQLite/REST/queue/MCP testing
+- **[docs/deployment.md](docs/deployment.md)** — Install instructions, coordinator/agent setup, storage, per-agent config, workspace isolation, troubleshooting
 
 ## Repo
 

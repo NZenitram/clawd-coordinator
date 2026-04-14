@@ -5,7 +5,7 @@
 Run the automated test suite:
 
 ```bash
-npm test          # 81 tests across 9 suites
+npm test          # 152 tests across 15 suites
 npm run lint      # TypeScript type-check (tsc --noEmit)
 ```
 
@@ -18,12 +18,18 @@ Tests are silenced for pino output via `COORD_LOG_LEVEL=silent` in the test scri
 | `tests/protocol/messages.test.ts` | 13 | Message creation, serialization, round-trip, parseMessage validation, MessageDeduplicator |
 | `tests/coordinator/registry.test.ts` | 17 | Agent registration, heartbeat, status transitions, stale agent detection, dead busy agent detection, concurrency (addTask/removeTask/hasCapacity), health updates |
 | `tests/coordinator/tasks.test.ts` | 12 | Task lifecycle, output append, output cap, truncation, cleanup, status filtering |
-| `tests/coordinator/server.test.ts` | 12 | Auth rejection, agent registration, heartbeat, disconnect, arg validation, status filter validation, name hijacking, task ownership, unhealthy agent dispatch refusal |
+| `tests/coordinator/queue.test.ts` | 8 | Task queue enqueue, dequeue, capacity checks, FIFO ordering |
+| `tests/coordinator/sqlite.test.ts` | 12 | SQLite persistence, recovery of stale tasks, task lifecycle with storage backend |
+| `tests/coordinator/server.test.ts` | 15 | Auth rejection, agent registration, heartbeat, disconnect, arg validation, status filter validation, name hijacking, task ownership, unhealthy agent dispatch refusal, per-agent tokens |
+| `tests/coordinator/rest.test.ts` | 10 | REST API auth, GET /api/agents, GET /api/tasks, POST /api/dispatch, task status filtering |
 | `tests/agent/executor.test.ts` | 10 | Prompt execution, error exit, sessionId flag, timeout, dangerouslySkipPermissions, maxBudgetUsd, concurrent process tracking, killTask, kill-all |
-| `tests/agent/daemon.test.ts` | 4 | Connect/register, unregister on stop, non-UUID taskId rejection, oversized prompt rejection |
+| `tests/agent/daemon.test.ts` | 6 | Connect/register, unregister on stop, non-UUID taskId rejection, oversized prompt rejection, per-agent token auth |
 | `tests/agent/health.test.ts` | 2 | Claude CLI health check (available/unavailable) |
-| `tests/integration/dispatch.test.ts` | 4 | End-to-end dispatch+streaming, unknown agent error, capacity rejection, multi-task concurrent dispatch |
-| `tests/shared/auth.test.ts` | 7 | Token generation, validation, per-agent token matching |
+| `tests/agent/isolation.test.ts` | 6 | NoneStrategy, WorktreeStrategy, TempDirStrategy setup/cleanup |
+| `tests/integration/dispatch.test.ts` | 6 | End-to-end dispatch+streaming, unknown agent error, capacity rejection, multi-task concurrent dispatch, queue processing |
+| `tests/shared/auth.test.ts` | 7 | Token generation, validation, per-agent token matching, token format validation |
+| `tests/mcp/server.test.ts` | 15 | dispatch_task tool, list_agents tool, list_tasks tool, get_task_result tool, error handling |
+| `tests/mcp/integration.test.ts` | 5 | MCP server startup, tool invocation end-to-end, coordinator communication |
 
 ## Manual Integration Test
 
@@ -164,3 +170,249 @@ Check server and agent logs for structured JSON output at every lifecycle event:
 ### 12. Cleanup
 
 Stop all processes (Ctrl+C or `kill`). Verify server logs agent disconnection.
+
+## SQLite Persistence Testing
+
+Test the persistent storage backend:
+
+### 1. Initialize with SQLite
+
+```bash
+npm run build
+coord init --force
+COORD_LOG_LEVEL=info coord serve -p 9999 --storage sqlite --db-path /tmp/coord-test.db
+```
+
+Expected output:
+```
+Using SQLite storage at /tmp/coord-test.db
+Coordinator listening on port 9999
+```
+
+### 2. Connect agent and dispatch task
+
+```bash
+TOKEN=$(cat ~/.coord/config.json | jq -r .token)
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" --name persist-agent
+
+# In another terminal
+coord run "echo 'test data'" --on persist-agent --url ws://localhost:9999
+```
+
+### 3. Verify task persisted
+
+```bash
+coord tasks --url ws://localhost:9999
+# Task should show with status "completed"
+```
+
+### 4. Restart coordinator
+
+Stop the `coord serve` process (Ctrl+C). Restart it with the same `--db-path`:
+
+```bash
+COORD_LOG_LEVEL=info coord serve -p 9999 --storage sqlite --db-path /tmp/coord-test.db
+```
+
+Expected output:
+```
+Using SQLite storage at /tmp/coord-test.db
+Coordinator listening on port 9999
+```
+
+### 5. Verify task recovered
+
+```bash
+coord tasks --url ws://localhost:9999
+# Previously completed task should still be visible
+```
+
+### 6. Test stale task recovery
+
+Dispatch a task, then kill the agent before it completes. Restart the coordinator:
+
+```bash
+# Kill agent (Ctrl+C in agent terminal)
+# Restart coordinator (Ctrl+C, then re-run `coord serve`)
+```
+
+Expected:
+- Coordinator logs: `Recovered X stale running task(s) from previous session`
+- Stale tasks marked as `error` status: `Agent disconnected while task was running`
+
+## REST API Testing
+
+Test the HTTP REST API endpoints:
+
+### 1. Start coordinator with REST enabled
+
+```bash
+npm run build
+TOKEN=$(cat ~/.coord/config.json | jq -r .token)
+COORD_LOG_LEVEL=info coord serve -p 8000
+```
+
+### 2. Connect agent
+
+```bash
+coord agent --url ws://localhost:8000 --token "$TOKEN" --name rest-test-agent
+```
+
+### 3. Test GET /api/agents
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
+```
+
+Expected: JSON list of connected agents with status, platform, uptime.
+
+### 4. Test POST /api/dispatch
+
+```bash
+curl -X POST http://localhost:8000/api/dispatch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agentName": "rest-test-agent", "prompt": "echo success", "maxBudgetUsd": 1.0}'
+```
+
+Expected: `{"taskId": "...", "status": "queued|running"}`
+
+### 5. Test GET /api/tasks
+
+```bash
+# List all tasks
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/tasks
+
+# Filter by status
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/tasks?status=running"
+```
+
+### 6. Test GET /api/tasks/:id
+
+```bash
+TASK_ID="<from previous response>"
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/tasks/$TASK_ID
+```
+
+Expected: Full task object with prompt, status, output, createdAt, completedAt.
+
+### 7. Test auth failure
+
+```bash
+curl -H "Authorization: Bearer wrong-token" http://localhost:8000/api/agents
+```
+
+Expected: HTTP 401 `{"error": "Unauthorized"}`
+
+## Task Queue Testing
+
+Test task queuing when agents are at max concurrency:
+
+### 1. Connect agent with max-concurrent=1
+
+```bash
+npm run build
+TOKEN=$(cat ~/.coord/config.json | jq -r .token)
+coord agent \
+  --url ws://localhost:8000 \
+  --token "$TOKEN" \
+  --name queue-test-agent \
+  --max-concurrent 1
+```
+
+### 2. Dispatch multiple tasks
+
+```bash
+# Dispatch 3 tasks in quick succession (all in background)
+for i in {1..3}; do
+  coord run "echo task-$i && sleep 2" --on queue-test-agent --url ws://localhost:8000 --bg
+  echo "Task $i dispatched"
+done
+```
+
+### 3. Monitor task queue
+
+```bash
+# Immediately check tasks
+coord tasks --url ws://localhost:8000
+
+# Expected: 1 running, 2 pending
+# As first task completes, second starts automatically
+```
+
+### 4. Verify FIFO order
+
+Check logs to confirm tasks execute in dispatch order:
+- Task 1: runs first
+- Task 2: queued, runs after task 1 completes
+- Task 3: queued, runs after task 2 completes
+
+Agent logs should show:
+```
+Task received: task-1-uuid
+Task finished: task-1-uuid
+Task received: task-2-uuid
+Task finished: task-2-uuid
+Task received: task-3-uuid
+Task finished: task-3-uuid
+```
+
+## MCP Server Testing
+
+Test the MCP server integration with Claude Code:
+
+### 1. Start MCP server
+
+```bash
+npm run build
+TOKEN=$(cat ~/.coord/config.json | jq -r .token)
+COORD_LOG_LEVEL=info coord mcp --url ws://localhost:8000
+```
+
+Expected output:
+```
+MCP server started on stdio
+```
+
+### 2. Configure Claude Code
+
+Add to `~/.config/Claude/claude_desktop_config.json` (or platform-specific config location):
+
+```json
+{
+  "mcpServers": {
+    "clawd-coordinator": {
+      "command": "node",
+      "args": ["/path/to/clawd-coordinator/dist/cli/index.js", "mcp", "--url", "ws://localhost:8000"]
+    }
+  }
+}
+```
+
+Restart Claude Code.
+
+### 3. Test MCP tools in Claude Code
+
+Inside Claude Code, with an agent connected:
+
+```
+I have agents connected. List them for me.
+```
+
+Claude should respond with a list of connected agents via the `list_agents` tool.
+
+```
+Dispatch a test task to my-agent that echoes 'hello world'
+```
+
+Claude should use the `dispatch_task` tool to dispatch and report the result.
+
+### 4. Verify tool responses
+
+All MCP tool calls should complete successfully:
+- `dispatch_task` returns task ID and status
+- `list_agents` returns agent list
+- `list_tasks` returns task list with optional filtering
+- `get_task_result` returns task output/error
