@@ -11,7 +11,7 @@ export const serveCommand = new Command('serve')
     const config = requireConfig();
     const port = parseInt(options.port, 10) || config.port || 8080;
 
-    const coordinatorOptions: CoordinatorOptions = { port, token: config.token };
+    const coordinatorOptions: CoordinatorOptions = { port, token: config.token, agentTokens: config.agentTokens };
 
     const tlsCert = options.tlsCert ?? config.tls?.cert;
     const tlsKey = options.tlsKey ?? config.tls?.key;

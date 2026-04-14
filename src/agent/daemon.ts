@@ -92,7 +92,7 @@ export class AgentDaemon {
         if (!msg) return;
 
         if (msg.type === 'task:dispatch') {
-          const { taskId, prompt, sessionId } = msg.payload;
+          const { taskId, prompt, sessionId, traceId, maxBudgetUsd } = msg.payload as any;
 
           const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           if (!taskId || !uuidRegex.test(taskId)) {
@@ -119,8 +119,8 @@ export class AgentDaemon {
             return;
           }
 
-          logger.info({ taskId }, 'Task received');
-          this.handleTask(taskId, prompt, sessionId);
+          logger.info({ taskId, traceId }, 'Task received');
+          this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd);
         }
       });
 
@@ -151,7 +151,7 @@ export class AgentDaemon {
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, maxDelay);
   }
 
-  private async handleTask(taskId: string, prompt: string, sessionId: string | undefined): Promise<void> {
+  private async handleTask(taskId: string, prompt: string, sessionId: string | undefined, traceId?: string, maxBudgetUsd?: number): Promise<void> {
     const stderrChunks: string[] = [];
     try {
       const result = await this.executor.run({
@@ -160,9 +160,10 @@ export class AgentDaemon {
         workingDirectory: this.options.workingDirectory,
         timeoutMs: this.options.taskTimeoutMs,
         dangerouslySkipPermissions: this.options.dangerouslySkipPermissions,
+        maxBudgetUsd,
         onOutput: (data) => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(serializeMessage(createTaskOutput({ taskId, data })));
+            this.ws.send(serializeMessage(createTaskOutput({ taskId, data, traceId })));
           }
         },
         onError: (data) => {
@@ -173,7 +174,7 @@ export class AgentDaemon {
       logger.info({ taskId, exitCode: result.exitCode, timedOut: result.timedOut }, 'Task finished');
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (result.exitCode === 0) {
-          this.ws.send(serializeMessage(createTaskComplete({ taskId })));
+          this.ws.send(serializeMessage(createTaskComplete({ taskId, traceId })));
         } else {
           const stderr = stderrChunks.join('').trim();
           let errorMsg: string;
@@ -187,15 +188,17 @@ export class AgentDaemon {
           this.ws.send(serializeMessage(createTaskError({
             taskId,
             error: errorMsg,
+            traceId,
           })));
         }
       }
     } catch (err) {
-      logger.error({ taskId, error: err instanceof Error ? err.message : String(err) }, 'Task execution failed');
+      logger.error({ taskId, traceId, error: err instanceof Error ? err.message : String(err) }, 'Task execution failed');
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(serializeMessage(createTaskError({
           taskId,
           error: err instanceof Error ? err.message : String(err),
+          traceId,
         })));
       }
     }

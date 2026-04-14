@@ -2,11 +2,12 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'node:http';
 import { createServer as createHttpsServer, Server as HttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { AgentRegistry } from './registry.js';
 import { logger } from '../shared/logger.js';
 import { TaskTracker, type TaskStatus } from './tasks.js';
-import { validateToken } from '../shared/auth.js';
+import { validateToken, validateAgentToken } from '../shared/auth.js';
 import {
   parseMessage,
   serializeMessage,
@@ -27,6 +28,7 @@ export interface CoordinatorOptions {
     cert: string;
     key: string;
   };
+  agentTokens?: Record<string, string>;
 }
 
 export class Coordinator {
@@ -50,16 +52,24 @@ export class Coordinator {
 
   async start(): Promise<void> {
     return new Promise((resolve) => {
+      const verifyClient = (info: { req: IncomingMessage }, cb: (result: boolean, code?: number, message?: string) => void) => {
+        const token = (info.req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
+        if (validateToken(token, this.options.token)) { cb(true); return; }
+        if (this.options.agentTokens && validateAgentToken(token, this.options.agentTokens)) { cb(true); return; }
+        logger.warn({ remoteAddress: info.req.socket.remoteAddress }, 'Authentication failed');
+        cb(false, 401, 'Unauthorized');
+      };
+
       if (this.options.tls) {
         const httpsServer = createHttpsServer({
           cert: readFileSync(this.options.tls.cert),
           key: readFileSync(this.options.tls.key),
         });
         this.httpsServer = httpsServer;
-        this.wss = new WebSocketServer({ server: httpsServer, maxPayload: 1 * 1024 * 1024 });
+        this.wss = new WebSocketServer({ server: httpsServer, maxPayload: 1 * 1024 * 1024, verifyClient });
         httpsServer.listen(this.options.port, () => resolve());
       } else {
-        this.wss = new WebSocketServer({ port: this.options.port, maxPayload: 1 * 1024 * 1024 }, () => {
+        this.wss = new WebSocketServer({ port: this.options.port, maxPayload: 1 * 1024 * 1024, verifyClient }, () => {
           resolve();
         });
       }
@@ -164,15 +174,9 @@ export class Coordinator {
   }
 
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    // Auth already verified by verifyClient — just route by path
     const url = new URL(req.url ?? '/', `http://localhost:${this.options.port}`);
-    const token = (req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
     const path = url.pathname;
-
-    if (!validateToken(token, this.options.token)) {
-      logger.warn({ path, remoteAddress: req.socket.remoteAddress }, 'Authentication failed');
-      ws.close(4001, 'Invalid token');
-      return;
-    }
 
     (ws as any).__isAlive = true;
     ws.on('pong', () => { (ws as any).__isAlive = true; });
@@ -398,11 +402,13 @@ export class Coordinator {
           return;
         }
 
-        const task = this.tasks.create({ agentName, prompt, sessionId });
+        const traceId = randomUUID();
+        const maxBudgetUsd = typeof args?.maxBudgetUsd === 'number' ? args.maxBudgetUsd : undefined;
+        const task = this.tasks.create({ agentName, prompt, sessionId, traceId });
         this.tasks.setRunning(task.id);
         this.registry.setBusy(agentName, task.id);
         this.taskOwners.set(task.id, ws);
-        logger.info({ agent: agentName, taskId: task.id }, 'Task dispatched');
+        logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
 
         if (!this.taskSubscribers.has(task.id)) {
           this.taskSubscribers.set(task.id, new Set());
@@ -415,6 +421,8 @@ export class Coordinator {
             taskId: task.id,
             prompt,
             sessionId,
+            traceId,
+            maxBudgetUsd,
           })));
         }
 

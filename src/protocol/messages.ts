@@ -25,20 +25,25 @@ export interface TaskDispatchPayload {
   taskId: string;
   prompt: string;
   sessionId: string | undefined;
+  traceId?: string;
+  maxBudgetUsd?: number;
 }
 
 export interface TaskOutputPayload {
   taskId: string;
   data: string;
+  traceId?: string;
 }
 
 export interface TaskCompletePayload {
   taskId: string;
+  traceId?: string;
 }
 
 export interface TaskErrorPayload {
   taskId: string;
   error: string;
+  traceId?: string;
 }
 
 export interface CliRequestPayload {

@@ -10,6 +10,7 @@ export interface Task {
   status: TaskStatus;
   output: string[];
   truncated: boolean;
+  traceId?: string;
   error?: string;
   createdAt: number;
   completedAt?: number;
@@ -23,12 +24,13 @@ export class TaskTracker {
     this.maxOutputLines = options?.maxOutputLines ?? 10000;
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string }): Task {
     const task: Task = {
       id: randomUUID(),
       agentName: params.agentName,
       prompt: params.prompt,
       sessionId: params.sessionId,
+      traceId: params.traceId,
       status: 'pending',
       output: [],
       truncated: false,

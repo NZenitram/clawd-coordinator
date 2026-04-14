@@ -56,10 +56,10 @@ describe('Coordinator', () => {
     const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
       headers: { 'authorization': 'Bearer wrong' },
     });
-    const code = await new Promise<number>((resolve) => {
-      ws.on('close', (code) => resolve(code));
+    await new Promise<void>((resolve, reject) => {
+      ws.on('error', () => resolve()); // Rejected at HTTP 401 before WS upgrade
+      ws.on('open', () => reject(new Error('Should not have connected')));
     });
-    expect(code).toBe(4001);
   });
 
   it('accepts agent connection with valid token and registration', async () => {

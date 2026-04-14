@@ -10,6 +10,7 @@ export interface CoordConfig {
     cert: string;
     key: string;
   };
+  agentTokens?: Record<string, string>;
 }
 
 const CONFIG_DIR = join(homedir(), '.coord');

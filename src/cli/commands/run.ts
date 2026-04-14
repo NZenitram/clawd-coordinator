@@ -10,7 +10,8 @@ export const runCommand = new Command('run')
   .option('--bg', 'Run in background and return task ID')
   .option('--url <url>', 'Coordinator URL')
   .option('--session <id>', 'Resume a specific Claude Code session')
-  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string }) => {
+  .option('--budget <usd>', 'Maximum budget in USD for this task')
+  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string; budget?: string }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
 
@@ -19,6 +20,7 @@ export const runCommand = new Command('run')
       agentName: options.on,
       prompt,
       sessionId: options.session,
+      maxBudgetUsd: options.budget ? parseFloat(options.budget) : undefined,
     });
 
     const payload = response.payload as any;

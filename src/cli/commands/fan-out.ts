@@ -8,7 +8,8 @@ export const fanOutCommand = new Command('fan-out')
   .argument('<prompt>', 'The prompt to send')
   .requiredOption('--on <agents>', 'Comma-separated agent names')
   .option('--url <url>', 'Coordinator URL')
-  .action(async (prompt: string, options: { on: string; url?: string }) => {
+  .option('--budget <usd>', 'Maximum budget in USD per task')
+  .action(async (prompt: string, options: { on: string; url?: string; budget?: string }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
     const agentNames = options.on.split(',').map(s => s.trim());
@@ -23,6 +24,7 @@ export const fanOutCommand = new Command('fan-out')
       const response = await sendRequest(ws, 'dispatch-task', {
         agentName,
         prompt,
+        maxBudgetUsd: options.budget ? parseFloat(options.budget) : undefined,
       });
 
       const payload = response.payload as any;
