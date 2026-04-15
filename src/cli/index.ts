@@ -17,6 +17,8 @@ import { sendMessageCommand } from './commands/send-message.js';
 import { pushCommand } from './commands/push.js';
 import { pullCommand } from './commands/pull.js';
 import { transferCommand } from './commands/transfer.js';
+import { describeCommand } from './commands/describe.js';
+import { claudeMdCommand } from './commands/claude-md.js';
 
 const program = new Command();
 
@@ -44,5 +46,7 @@ program.addCommand(sendMessageCommand);
 program.addCommand(pushCommand);
 program.addCommand(pullCommand);
 program.addCommand(transferCommand);
+program.addCommand(describeCommand);
+program.addCommand(claudeMdCommand);
 
 program.parse();
