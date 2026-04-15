@@ -105,6 +105,7 @@ export class AgentDaemon {
       this.reconnectTimer = null;
     }
     this.executor.kill();
+    this.fileReceiver.cleanupAll();
     if (this.ws) {
       this.ws.close();
       this.ws = null;

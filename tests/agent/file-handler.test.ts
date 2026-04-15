@@ -59,8 +59,8 @@ describe('FileSender', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('CHUNK_SIZE is 512KB', () => {
-    expect(CHUNK_SIZE).toBe(512 * 1024);
+  it('CHUNK_SIZE is 384KB (safe for 1MB maxPayload with base64 overhead)', () => {
+    expect(CHUNK_SIZE).toBe(384 * 1024);
   });
 
   it('sends a small file as a single chunk', async () => {

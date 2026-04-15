@@ -19,7 +19,7 @@ import {
   type FileTransferCompletePayload,
 } from '../protocol/messages.js';
 
-export const CHUNK_SIZE = 512 * 1024; // 512KB raw → ~682KB base64
+export const CHUNK_SIZE = 384 * 1024; // 384KB raw → ~512KB base64, well under 1MB maxPayload
 
 /** Returns true iff targetPath is inside cwd or one of addDirs. */
 export function isPathAllowed(targetPath: string, cwd: string, addDirs: string[]): boolean {
@@ -349,7 +349,41 @@ export class FileReceiver {
     if (session.fileStream) {
       session.fileStream.destroy();
     }
+    // Clean up partial files/directories
+    try {
+      if (fs.existsSync(session.destPath)) {
+        const stat = fs.statSync(session.destPath);
+        if (stat.isDirectory()) {
+          fs.rmSync(session.destPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(session.destPath);
+        }
+        logger.info({ transferId, destPath: session.destPath }, 'Cleaned up partial transfer');
+      }
+    } catch (cleanupErr) {
+      logger.warn({ transferId, error: String(cleanupErr) }, 'Failed to clean up partial transfer');
+    }
     session.reject(new Error(error));
+  }
+
+  /** Clean up all active sessions (for shutdown/disconnect) */
+  cleanupAll(): void {
+    for (const [transferId, session] of this.sessions) {
+      if (session.tarProcess) session.tarProcess.kill();
+      if (session.fileStream) session.fileStream.destroy();
+      try {
+        if (fs.existsSync(session.destPath)) {
+          const stat = fs.statSync(session.destPath);
+          if (stat.isDirectory()) {
+            fs.rmSync(session.destPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(session.destPath);
+          }
+        }
+      } catch { /* best effort */ }
+      session.reject(new Error('Transfer aborted — connection closed'));
+    }
+    this.sessions.clear();
   }
 
   hasSession(transferId: string): boolean {
