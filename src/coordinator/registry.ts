@@ -13,12 +13,15 @@ export interface AgentInfo {
   health?: AgentHealth;
   connectedAt: number;
   lastHeartbeat: number;
+  allowedTools?: string[];
+  addDirs?: string[];
+  permissionMode?: string;
 }
 
 export class AgentRegistry {
   private agents = new Map<string, AgentInfo>();
 
-  register(name: string, meta: { os: string; arch: string; maxConcurrent?: number }): void {
+  register(name: string, meta: { os: string; arch: string; maxConcurrent?: number; allowedTools?: string[]; addDirs?: string[]; permissionMode?: string }): void {
     if (this.agents.has(name)) {
       throw new Error(`Agent "${name}" is already registered`);
     }
@@ -32,6 +35,9 @@ export class AgentRegistry {
       maxConcurrent: meta.maxConcurrent ?? 1,
       connectedAt: now,
       lastHeartbeat: now,
+      allowedTools: meta.allowedTools,
+      addDirs: meta.addDirs,
+      permissionMode: meta.permissionMode,
     });
   }
 

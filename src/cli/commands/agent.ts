@@ -11,7 +11,20 @@ export const agentCommand = new Command('agent')
   .option('--dangerously-skip-permissions', 'Skip Claude permission prompts for headless use')
   .option('--max-concurrent <n>', 'Maximum concurrent tasks (default: 1)', '1')
   .option('--isolation <none|worktree|tmpdir>', 'Per-task workspace isolation strategy (default: none)', 'none')
-  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean; maxConcurrent?: string; isolation?: string }) => {
+  .option('--allowed-tools <tools>', 'Comma-separated tools to pre-authorize (e.g., "Read,Write,Edit,Bash")')
+  .option('--disallowed-tools <tools>', 'Comma-separated tools to deny')
+  .option('--add-dirs <dirs>', 'Comma-separated additional directory paths to allow')
+  .option('--permission-mode <mode>', 'Permission mode: acceptEdits, auto, default, plan')
+  .action(async (options: { url: string; token: string; name: string; cwd?: string; dangerouslySkipPermissions?: boolean; maxConcurrent?: string; isolation?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string; permissionMode?: string }) => {
+    if (options.dangerouslySkipPermissions && (options.allowedTools || options.permissionMode)) {
+      console.error('Error: --dangerously-skip-permissions is mutually exclusive with --allowed-tools and --permission-mode');
+      process.exit(1);
+    }
+
+    const allowedTools = options.allowedTools ? options.allowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const disallowedTools = options.disallowedTools ? options.disallowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const addDirs = options.addDirs ? options.addDirs.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+
     const daemon = new AgentDaemon({
       name: options.name,
       coordinatorUrl: options.url,
@@ -20,6 +33,10 @@ export const agentCommand = new Command('agent')
       dangerouslySkipPermissions: options.dangerouslySkipPermissions,
       maxConcurrent: options.maxConcurrent ? parseInt(options.maxConcurrent, 10) : undefined,
       isolation: (options.isolation ?? 'none') as IsolationMode,
+      allowedTools,
+      disallowedTools,
+      addDirs,
+      permissionMode: options.permissionMode,
     });
 
     try {

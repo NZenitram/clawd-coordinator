@@ -9,6 +9,10 @@ export interface RunOptions {
   maxBudgetUsd?: number;
   timeoutMs?: number;
   dangerouslySkipPermissions?: boolean;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  addDirs?: string[];
+  permissionMode?: string;
   onOutput: (data: string) => void;
   onError?: (data: string) => void;
 }
@@ -45,6 +49,21 @@ export class Executor {
     }
     if (options.dangerouslySkipPermissions) {
       args.unshift('--dangerouslySkipPermissions');
+    } else {
+      if (options.permissionMode) {
+        args.unshift('--permission-mode', options.permissionMode);
+      }
+      if (options.allowedTools?.length) {
+        args.unshift('--allowedTools', options.allowedTools.join(','));
+      }
+      if (options.disallowedTools?.length) {
+        args.unshift('--disallowedTools', options.disallowedTools.join(','));
+      }
+      if (options.addDirs?.length) {
+        for (const dir of options.addDirs) {
+          args.unshift('--add-dir', dir);
+        }
+      }
     }
 
     // -- separator prevents prompt from being interpreted as flags

@@ -19,10 +19,13 @@ export interface Task {
   deadLettered: boolean;
   ownerUserId?: string;
   orgId?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  addDirs?: string[];
 }
 
 export interface TaskStore {
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string }): Task;
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string; allowedTools?: string[]; disallowedTools?: string[]; addDirs?: string[] }): Task;
   get(id: string): Task | null;
   list(status?: TaskStatus, orgId?: string): Task[];
   setRunning(id: string): void;
@@ -41,7 +44,7 @@ export class TaskTracker implements TaskStore {
     this.maxOutputLines = options?.maxOutputLines ?? 10000;
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string; allowedTools?: string[]; disallowedTools?: string[]; addDirs?: string[] }): Task {
     const task: Task = {
       id: randomUUID(),
       agentName: params.agentName,
@@ -57,6 +60,9 @@ export class TaskTracker implements TaskStore {
       deadLettered: false,
       ownerUserId: params.ownerUserId,
       orgId: params.orgId,
+      allowedTools: params.allowedTools,
+      disallowedTools: params.disallowedTools,
+      addDirs: params.addDirs,
     };
     this.tasks.set(task.id, task);
     return task;

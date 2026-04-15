@@ -120,10 +120,10 @@ Local Machine                          Remote Machines
 |---------|-------------|-----------|
 | `coord init` | Generate config and auth token | `--force`, `--show-token` |
 | `coord serve` | Start coordinator WebSocket server | `-p, --port`, `--tls-cert`, `--tls-key`, `--storage`, `--db-path` |
-| `coord agent` | Start remote agent daemon | `--url`, `--token`, `--name`, `--cwd`, `--max-concurrent`, `--isolation` |
+| `coord agent` | Start remote agent daemon | `--url`, `--token`, `--name`, `--cwd`, `--max-concurrent`, `--isolation`, `--allowed-tools`, `--disallowed-tools`, `--add-dirs`, `--permission-mode` |
 | `coord agents` | List connected agents | `--url` |
-| `coord run` | Dispatch prompt to agent and stream output | `--on <agent>`, `--bg`, `--url`, `--session`, `--budget` |
-| `coord fan-out` | Dispatch to multiple agents in parallel | `--on <a,b,c>`, `--url`, `--budget` |
+| `coord run` | Dispatch prompt to agent and stream output | `--on <agent>`, `--bg`, `--url`, `--session`, `--budget`, `--allowed-tools`, `--disallowed-tools`, `--add-dirs` |
+| `coord fan-out` | Dispatch to multiple agents in parallel | `--on <a,b,c>`, `--url`, `--budget`, `--allowed-tools`, `--disallowed-tools`, `--add-dirs` |
 | `coord tasks` | List all tasks (filter by status) | `--url`, `--status` |
 | `coord attach` | Stream output from a running task | `--url` |
 | `coord result` | Get output from completed task | `--url` |
@@ -166,6 +166,20 @@ coord agent --url wss://host:8080 --token TOKEN --name my-agent --max-concurrent
 **Workspace isolation (git worktrees):**
 ```bash
 coord agent --url wss://host:8080 --token TOKEN --name my-agent --isolation worktree
+```
+
+**Agent with pre-authorized tools (no permission prompts):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name my-agent \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+```
+
+**Task with restricted permissions:**
+```bash
+coord run "audit the config" --on ops-agent \
+  --allowed-tools "Read" \
+  --add-dirs "/etc/openclaw"
 ```
 
 **Interactive dashboard:**
@@ -427,6 +441,124 @@ Messages are delivered in real-time over WebSocket using the `agent:message` and
 - Coordinator fanout: agent-a fans out a task to agents b, c, d and collects results
 - Data aggregation: multiple agents collect data and send to a single aggregator agent
 - Pipeline: agent-a produces data for agent-b, agent-b processes and sends to agent-c
+
+## Permissions
+
+Claude Code has three permission modes: default (interactive prompting), pre-authorized tools (granular allowlist), and skip-all (headless). The coordinator now supports Claude's native permission flags, allowing you to configure permissions at the agent level or override them per-task.
+
+### Three Permission Modes
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `default` | Claude prompts for permission on each tool use | Interactive development, high control |
+| `auto` | Uses pre-authorized tools without prompting | Headless agents, pre-approved workflows |
+| `plan` | Claude shows a plan, waits for approval, then executes | Structured workflows with review checkpoints |
+| `acceptEdits` | Auto-accepts file edits (Write/Edit), prompts for other tools | Development with auto-save, manual control for Bash/CLI |
+
+### Agent-Level Configuration
+
+Configure baseline permissions when starting an agent:
+
+```bash
+# Development agent — read/write/edit in project dir
+coord agent --url wss://host:8080 --token TOKEN --name dev-agent \
+  --cwd /home/user/project \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+
+# Read-only monitoring agent
+coord agent --url wss://host:8080 --token TOKEN --name monitor-agent \
+  --cwd /home/user \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*),Bash(ls:*)" \
+  --permission-mode default
+
+# Ops agent with broad access
+coord agent --url wss://host:8080 --token TOKEN --name ops-agent \
+  --cwd /home/user \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --add-dirs "/etc,/var/log" \
+  --permission-mode auto
+```
+
+### Per-Task Permission Overrides
+
+Restrict (but never expand) permissions for individual tasks:
+
+```bash
+# Audit task — restrict ops agent to read-only
+coord run "audit the config files" --on ops-agent \
+  --allowed-tools "Read" \
+  --add-dirs "/etc/openclaw"
+
+# Safe refactoring — pre-approve specific tools
+coord run "refactor authentication module" --on dev-agent \
+  --allowed-tools "Read,Write,Edit" \
+  --add-dirs "/home/user/project/auth"
+```
+
+### MCP Tool Permission Parameters
+
+When using the MCP server, the `dispatch_task` tool accepts optional permission parameters:
+
+```
+dispatch_task(
+  agentName: string,
+  prompt: string,
+  allowedTools?: string,      # comma-separated tools (e.g., "Read,Write,Edit")
+  disallowedTools?: string,   # tools to deny (overrides agent config)
+  addDirs?: string            # additional allowed directories
+)
+```
+
+### Permission Matrix — Tool Access
+
+| Tool | Description | Examples |
+|------|-------------|----------|
+| `Read` | Read files and directories | View code, inspect configs |
+| `Write` | Create and write files | Create new files, write logs |
+| `Edit` | Edit existing files | Modify code, fix bugs |
+| `Bash` | Execute shell commands | Run tests, deploy, git operations |
+| `Bash(git:*)` | Git-only shell access | `git clone`, `git push`, etc. |
+| `Bash(cat:*)` | Cat-only shell access | Read file contents safely |
+
+### Key Behaviors
+
+1. **Mutually exclusive with `--dangerously-skip-permissions`** — Error if both are set
+2. **Per-task overrides restrict only** — Cannot expand beyond the agent's baseline permissions
+3. **Backward compatible** — Omitting all flags = Claude Code's default permission prompting
+4. **Shown in agent status** — `coord agents` displays each agent's configured permissions
+
+### Permission Examples by Use Case
+
+**Development (auto-approve in project dir):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name dev-agent \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+```
+
+**CI/CD (broad access with approval):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name ci-agent \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --add-dirs "/etc/systemd/system,/var/lib" \
+  --permission-mode plan
+```
+
+**Monitoring (read-only with safe commands):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name monitor-agent \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*),Bash(ps:*)" \
+  --permission-mode default
+```
+
+**Agent management (edit system files, run systemctl):**
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name manager-agent \
+  --allowed-tools "Read,Write,Edit,Bash(systemctl:*)" \
+  --add-dirs "/etc/systemd/system" \
+  --permission-mode auto
+```
 
 ## Workspace Isolation
 

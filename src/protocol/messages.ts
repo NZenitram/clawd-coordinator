@@ -23,6 +23,9 @@ export interface AgentRegisterPayload {
   arch: string;
   maxConcurrent?: number;
   health?: AgentHealthPayload;
+  allowedTools?: string[];
+  addDirs?: string[];
+  permissionMode?: string;
 }
 
 export interface AgentHeartbeatPayload {
@@ -37,6 +40,9 @@ export interface TaskDispatchPayload {
   traceId?: string;
   maxBudgetUsd?: number;
   retryAttempt?: number;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  addDirs?: string[];
 }
 
 export interface AgentMessagePayload {

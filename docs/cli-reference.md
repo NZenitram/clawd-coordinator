@@ -115,29 +115,64 @@ coord agent [options]
 | `--token <token>` | Yes | - | Auth token |
 | `--name <name>` | Yes | - | Agent name |
 | `--cwd <directory>` | - | - | Working directory for Claude Code |
-| `--dangerously-skip-permissions` | - | - | Skip Claude permission prompts for headless use |
+| `--allowed-tools <tools>` | - | - | Comma-separated pre-authorized tools (e.g., "Read,Write,Edit,Bash(git:*)") |
+| `--disallowed-tools <tools>` | - | - | Comma-separated tools to deny (overrides any include) |
+| `--add-dirs <dirs>` | - | - | Comma-separated additional directories to allow access to |
+| `--permission-mode <mode>` | - | `default` | Permission mode: default, auto, plan, acceptEdits |
+| `--dangerously-skip-permissions` | - | - | Skip all Claude permission prompts (mutually exclusive with permission flags) |
 | `--max-concurrent <n>` | - | `1` | Maximum concurrent tasks |
 | `--isolation <none\|worktree\|tmpdir>` | - | `none` | Per-task workspace isolation strategy |
 
+**Permission Flags**
+
+- `--allowed-tools` — Comma-separated list of tools to pre-authorize. Tools can be specific (e.g., `Read`, `Write`, `Edit`) or scoped (e.g., `Bash(git:*)` for git-only access). Used with `--permission-mode auto` or `plan`.
+- `--disallowed-tools` — Tools to explicitly deny. Takes precedence over `--allowed-tools`.
+- `--add-dirs` — Additional directory paths Claude can access. Extends the default `--cwd` access.
+- `--permission-mode` — How Claude Code handles permissions:
+  - `default` — Interactive prompting on each tool use (most control)
+  - `auto` — Pre-authorized tools execute without prompting (headless)
+  - `plan` — Claude shows a plan, waits for approval, then executes
+  - `acceptEdits` — Auto-accept file edits, prompt for other tools
+
+**Note:** `--dangerously-skip-permissions` and permission flags are mutually exclusive. Using both will error.
+
 **Examples:**
+
+Development agent (auto-approve in project):
 ```bash
-# Start agent with default settings
-coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1
+coord agent --url wss://coordinator.example.com:8080 --token abc123 --name dev-agent \
+  --cwd /home/ubuntu/project \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+```
 
-# Start agent with custom working directory
+Read-only agent (monitoring/inspection):
+```bash
+coord agent --url wss://coordinator.example.com:8080 --token abc123 --name monitor-agent \
+  --cwd /home/ubuntu \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*),Bash(ls:*)" \
+  --permission-mode default
+```
+
+Ops agent with system access:
+```bash
+coord agent --url wss://coordinator.example.com:8080 --token abc123 --name ops-agent \
+  --cwd /home/ubuntu \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --add-dirs "/etc,/var/log,/var/lib" \
+  --permission-mode auto
+```
+
+Agent with custom permission workflow:
+```bash
+coord agent --url wss://coordinator.example.com:8080 --token abc123 --name ci-agent \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --permission-mode plan
+```
+
+Basic agent with default interactive prompting (no pre-auth):
+```bash
 coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1 --cwd /home/ubuntu/workdir
-
-# Start agent in headless mode (skip permission prompts)
-coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1 --dangerously-skip-permissions
-
-# Start agent with multiple concurrent tasks
-coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1 --max-concurrent 4
-
-# Start agent with workspace isolation using worktrees
-coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1 --isolation worktree
-
-# Start agent with isolation using temporary directories
-coord agent --url wss://coordinator.example.com:8080 --token abc123 --name agent-1 --isolation tmpdir
 ```
 
 ---
@@ -191,22 +226,57 @@ coord run <prompt> [options]
 | `--url <url>` | `ws://localhost:8080` | Coordinator URL |
 | `--session <id>` | - | Resume a specific Claude Code session |
 | `--budget <usd>` | - | Maximum budget in USD for this task |
+| `--allowed-tools <tools>` | - | Restrict (but not expand) agent's pre-authorized tools for this task |
+| `--disallowed-tools <tools>` | - | Additional tools to deny for this task |
+| `--add-dirs <dirs>` | - | Restrict to a subset of agent's allowed directories |
+
+**Permission Overrides**
+
+Per-task permission flags can restrict (but never expand) the agent's baseline permissions:
+
+- `--allowed-tools` — Only these tools are permitted for this task (must be subset of agent config)
+- `--disallowed-tools` — These tools are denied, even if in agent's `--allowed-tools`
+- `--add-dirs` — Restrict to these directories only (subset of agent's `--add-dirs`)
+
+These are useful for sensitive tasks where you want to narrow scope beyond the agent's default permissions.
 
 **Examples:**
+
+Run and stream output:
 ```bash
-# Run a prompt and stream output
 coord run "Create a hello world Python script" --on agent-1
+```
 
-# Run a prompt in background
+Run in background:
+```bash
 coord run "Analyze data.csv" --on agent-1 --bg
+```
 
-# Run a prompt on specific session
-coord run "Continue the work" --on agent-1 --session abc123def456
-
-# Run with a budget limit
+Run with budget limit:
+```bash
 coord run "Generate report" --on agent-1 --budget 5.00
+```
 
-# Run on custom coordinator
+Run on specific session:
+```bash
+coord run "Continue the work" --on agent-1 --session abc123def456
+```
+
+Run with restricted permissions (audit task on ops agent):
+```bash
+coord run "audit the config files" --on ops-agent \
+  --allowed-tools "Read" \
+  --add-dirs "/etc/openclaw"
+```
+
+Run a safe refactoring with pre-approved tools:
+```bash
+coord run "refactor auth module" --on dev-agent \
+  --allowed-tools "Read,Write,Edit"
+```
+
+Run on custom coordinator:
+```bash
 coord run "Deploy changes" --on agent-1 --url wss://coordinator.example.com:8080
 ```
 
@@ -232,16 +302,34 @@ coord fan-out <prompt> [options]
 | `--on <agents>` | - | Comma-separated agent names (required) |
 | `--url <url>` | `ws://localhost:8080` | Coordinator URL |
 | `--budget <usd>` | - | Maximum budget in USD per task |
+| `--allowed-tools <tools>` | - | Restrict tools for all dispatched tasks |
+| `--disallowed-tools <tools>` | - | Additional tools to deny for all tasks |
+| `--add-dirs <dirs>` | - | Restrict directories for all tasks |
+
+**Permission Overrides**
+
+Same as `coord run` — permission flags apply to all tasks in the fan-out. Useful for bulk operations where you want consistent permission constraints across agents.
 
 **Examples:**
+
+Dispatch to multiple agents:
 ```bash
-# Dispatch to multiple agents
 coord fan-out "Run tests" --on agent-1,agent-2,agent-3
+```
 
-# Dispatch with budget limit per task
+Dispatch with budget limit per task:
+```bash
 coord fan-out "Benchmark system" --on agent-1,agent-2 --budget 2.50
+```
 
-# Dispatch to custom coordinator
+Dispatch with restricted permissions (e.g., read-only audit across all agents):
+```bash
+coord fan-out "Check for security issues" --on agent-1,agent-2,agent-3 \
+  --allowed-tools "Read"
+```
+
+Dispatch to custom coordinator:
+```bash
 coord fan-out "Sync database" --on agent-1,agent-2 --url wss://coordinator.example.com:8080
 ```
 

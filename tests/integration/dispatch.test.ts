@@ -153,6 +153,52 @@ describe('End-to-end dispatch', () => {
     cliWs.close();
   });
 
+  it('passes allowedTools in dispatch-task through to the task:dispatch message the agent receives', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+        headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+      });
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+
+    agentWs.send(serializeMessage(createAgentRegister({
+      name: 'tools-agent',
+      os: 'linux',
+      arch: 'x64',
+    })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Capture the task:dispatch message received by the agent
+    const dispatchReceived = new Promise<import('../../src/protocol/messages.js').AnyMessage>((resolve) => {
+      agentWs.once('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg && msg.type === 'task:dispatch') resolve(msg);
+      });
+    });
+
+    const cliWs = await connectCli(`ws://localhost:${TEST_PORT}`, TEST_TOKEN);
+    await sendRequest(cliWs, 'dispatch-task', {
+      agentName: 'tools-agent',
+      prompt: 'do work',
+      allowedTools: ['Read', 'Write'],
+      disallowedTools: ['Bash'],
+      addDirs: ['/tmp/workspace'],
+    });
+
+    const dispatchMsg = await dispatchReceived;
+    const payload = dispatchMsg.payload as any;
+    expect(payload.allowedTools).toEqual(['Read', 'Write']);
+    expect(payload.disallowedTools).toEqual(['Bash']);
+    expect(payload.addDirs).toEqual(['/tmp/workspace']);
+
+    agentWs.close();
+    cliWs.close();
+  });
+
   it('queues task when agent is at capacity', async () => {
     coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
     await coordinator.start();

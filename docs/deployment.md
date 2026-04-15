@@ -142,7 +142,133 @@ coord serve -p 8080 --storage sqlite --db-path ~/.coord/tasks.db
 
 On restart, incomplete running tasks are automatically recovered and retried. Completed and error tasks remain in the database for audit trails and troubleshooting.
 
-### Per-Agent Configuration
+### Permission Configuration
+
+Agents support three permission approaches: default interactive prompting, granular pre-authorized tools, or `--dangerously-skip-permissions` for full headless access. Choose based on your trust and operational requirements.
+
+### Permission Modes
+
+| Mode | Prompting | Use Case |
+|------|-----------|----------|
+| `default` | Interactive (prompts on each tool) | Development with human oversight |
+| `auto` | None (pre-approved tools only) | Headless automation |
+| `plan` | Plan approval (show plan, wait for OK, then execute) | Structured workflows with checkpoints |
+| `acceptEdits` | Auto-accept file edits, prompt for other tools | Development with auto-save |
+
+### Configure Agent Permissions
+
+Development agent (auto-approve specified tools):
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name dev-agent \
+  --cwd /home/ubuntu/project \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+```
+
+Read-only agent (monitoring):
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name monitor-agent \
+  --cwd /home/ubuntu \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*),Bash(ps:*)" \
+  --permission-mode default
+```
+
+Ops agent (broad access with approval):
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name ops-agent \
+  --cwd /home/ubuntu \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --add-dirs "/etc,/var/log,/var/lib" \
+  --permission-mode plan
+```
+
+Agent managing other agents (systemd access):
+```bash
+coord agent --url wss://host:8080 --token TOKEN --name manager-agent \
+  --cwd /home/ubuntu \
+  --allowed-tools "Read,Write,Edit,Bash(systemctl:*)" \
+  --add-dirs "/etc/systemd/system" \
+  --permission-mode auto
+```
+
+### Systemd Service with Permissions
+
+Example systemd service file with permission configuration:
+
+```ini
+# /etc/systemd/system/coord-agent-dev.service
+[Unit]
+Description=Clawd Coordinator Agent (Development)
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+Environment=COORD_LOG_LEVEL=info
+ExecStart=/usr/local/bin/coord agent \
+  --url wss://coordinator.example.ts.net \
+  --token <token> \
+  --name dev-agent \
+  --cwd /home/deploy/project \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto \
+  --max-concurrent 2 \
+  --isolation worktree
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/coord-agent-monitor.service
+[Unit]
+Description=Clawd Coordinator Agent (Read-Only Monitor)
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+Environment=COORD_LOG_LEVEL=info
+ExecStart=/usr/local/bin/coord agent \
+  --url wss://coordinator.example.ts.net \
+  --token <token> \
+  --name monitor-agent \
+  --cwd /home/deploy \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*),Bash(ps:*)" \
+  --permission-mode default
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Per-Task Permission Overrides
+
+Restrict permissions for a specific task:
+
+```bash
+# Audit task on ops agent — read-only only
+coord run "audit security configs" --on ops-agent \
+  --allowed-tools "Read" \
+  --add-dirs "/etc/openclaw"
+
+# Safe refactoring — limit to project directory
+coord run "refactor auth module" --on dev-agent \
+  --allowed-tools "Read,Write,Edit" \
+  --add-dirs "/home/deploy/project/auth"
+```
+
+### Security Notes
+
+1. **Pre-authorized tools + mode auto** — Claude executes without prompting. Use only for trusted operations.
+2. **Per-task restrictions** — Can only restrict, never expand. Useful for narrowing scope on sensitive operations.
+3. **Tool scoping** — `Bash(git:*)` limits shell to git commands. `Bash(cat:*)` limits to cat only.
+4. **Directory access** — `--add-dirs` extends beyond `--cwd`. Useful for system agents accessing `/etc`, `/var/log`.
+
+## Per-Agent Configuration
 
 **Maximum concurrent tasks:**
 ```bash

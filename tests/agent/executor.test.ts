@@ -173,6 +173,78 @@ describe('Executor', () => {
     expect(args).not.toContain('--dangerouslySkipPermissions');
   });
 
+  it('passes --allowedTools when set', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      taskId: 'test-allowed-tools',
+      allowedTools: ['Read', 'Write'],
+      onOutput: () => {},
+    });
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    const idx = args.indexOf('--allowedTools');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('Read,Write');
+  });
+
+  it('passes --add-dir for each directory', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      taskId: 'test-add-dirs',
+      addDirs: ['/tmp/a', '/tmp/b'],
+      onOutput: () => {},
+    });
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    // Each dir gets its own --add-dir flag
+    const addDirIndices = args.reduce<number[]>((acc, val, i) => {
+      if (val === '--add-dir') acc.push(i);
+      return acc;
+    }, []);
+    expect(addDirIndices).toHaveLength(2);
+    const dirs = addDirIndices.map(i => args[i + 1]);
+    expect(dirs).toContain('/tmp/a');
+    expect(dirs).toContain('/tmp/b');
+  });
+
+  it('passes --permission-mode when set', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      taskId: 'test-permission-mode',
+      permissionMode: 'auto',
+      onOutput: () => {},
+    });
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    const idx = args.indexOf('--permission-mode');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('auto');
+  });
+
+  it('skips permission flags when dangerouslySkipPermissions is set', async () => {
+    const executor = new Executor();
+    await executor.run({
+      prompt: 'test',
+      taskId: 'test-skip-perms',
+      dangerouslySkipPermissions: true,
+      allowedTools: ['Read', 'Write'],
+      permissionMode: 'auto',
+      addDirs: ['/tmp/a'],
+      disallowedTools: ['Bash'],
+      onOutput: () => {},
+    });
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).toContain('--dangerouslySkipPermissions');
+    expect(args).not.toContain('--allowedTools');
+    expect(args).not.toContain('--permission-mode');
+    expect(args).not.toContain('--add-dir');
+    expect(args).not.toContain('--disallowedTools');
+  });
+
   it('tracks multiple concurrent processes by taskId', async () => {
     const output1: string[] = [];
     const output2: string[] = [];

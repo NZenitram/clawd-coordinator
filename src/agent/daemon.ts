@@ -33,6 +33,10 @@ export interface AgentDaemonOptions {
   dangerouslySkipPermissions?: boolean;
   maxConcurrent?: number;
   isolation?: IsolationMode;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  addDirs?: string[];
+  permissionMode?: string;
 }
 
 export class AgentDaemon {
@@ -115,6 +119,9 @@ export class AgentDaemon {
           arch: arch(),
           maxConcurrent: this.options.maxConcurrent,
           health: this.lastHealth,
+          allowedTools: this.options.allowedTools,
+          addDirs: this.options.addDirs,
+          permissionMode: this.options.permissionMode,
         })));
 
         const interval = this.options.heartbeatIntervalMs ?? 30000;
@@ -136,6 +143,7 @@ export class AgentDaemon {
 
         if (msg.type === 'task:dispatch') {
           const { taskId, prompt, sessionId, traceId, maxBudgetUsd } = msg.payload as any;
+          const taskPayload = msg.payload as any;
 
           const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           if (!taskId || !uuidRegex.test(taskId)) {
@@ -173,9 +181,62 @@ export class AgentDaemon {
             return;
           }
 
+          // Compute effective permissions (only when not dangerouslySkipPermissions)
+          let effectiveAllowedTools: string[] | undefined;
+          let effectiveDisallowedTools: string[] | undefined;
+          let effectiveAddDirs: string[] | undefined;
+          let effectivePermissionMode: string | undefined;
+
+          if (!this.options.dangerouslySkipPermissions) {
+            const taskAllowedTools: string[] = Array.isArray(taskPayload.allowedTools)
+              ? (taskPayload.allowedTools as unknown[]).filter((t): t is string => typeof t === 'string')
+              : [];
+            const taskDisallowedTools: string[] = Array.isArray(taskPayload.disallowedTools)
+              ? (taskPayload.disallowedTools as unknown[]).filter((t): t is string => typeof t === 'string')
+              : [];
+            const taskAddDirs: string[] = Array.isArray(taskPayload.addDirs)
+              ? (taskPayload.addDirs as unknown[]).filter((d): d is string => typeof d === 'string')
+              : [];
+
+            const agentAllowedTools = this.options.allowedTools;
+            const agentDisallowedTools = this.options.disallowedTools ?? [];
+            const agentAddDirs = this.options.addDirs;
+
+            // allowedTools: intersection — task can only restrict, not expand agent-level
+            if (agentAllowedTools !== undefined) {
+              const agentSet = new Set(agentAllowedTools);
+              effectiveAllowedTools = taskAllowedTools.length > 0
+                ? taskAllowedTools.filter(t => agentSet.has(t))
+                : agentAllowedTools;
+            } else if (taskAllowedTools.length > 0) {
+              effectiveAllowedTools = taskAllowedTools;
+            }
+
+            // disallowedTools: union — more restrictive wins
+            const disallowedUnion = new Set([...agentDisallowedTools, ...taskDisallowedTools]);
+            effectiveDisallowedTools = disallowedUnion.size > 0 ? Array.from(disallowedUnion) : undefined;
+
+            // addDirs: task-level must be subpaths of agent-level dirs (or agent-level if no task override)
+            if (agentAddDirs !== undefined) {
+              if (taskAddDirs.length > 0) {
+                effectiveAddDirs = taskAddDirs.filter(taskDir =>
+                  agentAddDirs.some(agentDir => taskDir === agentDir || taskDir.startsWith(agentDir + '/'))
+                );
+                if (effectiveAddDirs.length === 0) effectiveAddDirs = undefined;
+              } else {
+                effectiveAddDirs = agentAddDirs;
+              }
+            } else if (taskAddDirs.length > 0) {
+              effectiveAddDirs = taskAddDirs;
+            }
+
+            // permissionMode: agent-level takes precedence; task cannot override
+            effectivePermissionMode = this.options.permissionMode;
+          }
+
           logger.info({ taskId, traceId }, 'Task received');
           this.runningTaskCount++;
-          this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd).finally(() => {
+          this.handleTask(taskId, prompt, sessionId, traceId, maxBudgetUsd, effectiveAllowedTools, effectiveDisallowedTools, effectiveAddDirs, effectivePermissionMode).finally(() => {
             this.runningTaskCount--;
           });
         } else if (msg.type === 'session:list-request') {
@@ -270,7 +331,7 @@ export class AgentDaemon {
     }
   }
 
-  private async handleTask(taskId: string, prompt: string, sessionId: string | undefined, traceId?: string, maxBudgetUsd?: number): Promise<void> {
+  private async handleTask(taskId: string, prompt: string, sessionId: string | undefined, traceId?: string, maxBudgetUsd?: number, allowedTools?: string[], disallowedTools?: string[], addDirs?: string[], permissionMode?: string): Promise<void> {
     const stderrChunks: string[] = [];
     const MAX_STDERR_BYTES = 1024 * 1024; // 1MB cap
     let stderrBytes = 0;
@@ -298,6 +359,10 @@ export class AgentDaemon {
         timeoutMs: this.options.taskTimeoutMs,
         dangerouslySkipPermissions: this.options.dangerouslySkipPermissions,
         maxBudgetUsd,
+        allowedTools,
+        disallowedTools,
+        addDirs,
+        permissionMode,
         onOutput: (data) => {
           if (this.ws) {
             safeSend(this.ws, serializeMessage(createTaskOutput({ taskId, data, traceId })));

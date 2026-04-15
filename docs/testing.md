@@ -416,3 +416,260 @@ All MCP tool calls should complete successfully:
 - `list_agents` returns agent list
 - `list_tasks` returns task list with optional filtering
 - `get_task_result` returns task output/error
+
+## Permission Testing
+
+Test the pre-authorized tools/paths feature to ensure granular permissions work correctly.
+
+### 1. Start coordinator
+
+```bash
+npm run build
+coord init --force
+COORD_LOG_LEVEL=info coord serve -p 9999
+```
+
+### 2. Connect an agent with permission flags
+
+In a second terminal:
+
+```bash
+TOKEN=$(cat ~/.coord/config.json | node -e "process.stdin.on('data',d=>console.log(JSON.parse(d).token))")
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name perm-agent \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+```
+
+Expected output:
+- Agent logs: `Agent connected with permissions: allowed=[Read,Write,Edit,Bash(git:*)], mode=auto`
+
+### 3. Verify agent permissions in status
+
+```bash
+coord agents --url ws://localhost:9999
+```
+
+Expected: Agent shows configured permissions in the output (implementation-dependent, check agent metadata).
+
+### 4. Test task dispatch with permission overrides
+
+**Test case: Restrict to read-only**
+
+```bash
+coord run "cat README.md" --on perm-agent --url ws://localhost:9999 \
+  --allowed-tools "Read"
+```
+
+Expected:
+- Task succeeds (Read is in agent's baseline)
+- Output shows file contents
+
+**Test case: Attempt to restrict beyond baseline (should error)**
+
+```bash
+coord run "echo test > file.txt" --on perm-agent --url ws://localhost:9999 \
+  --allowed-tools "Read"
+```
+
+Expected:
+- Task runs but Write is restricted
+- Claude either: (a) doesn't attempt Write, or (b) prompts (depending on mode)
+
+### 5. Test permission mode transitions
+
+**Test agent with mode=default (interactive)**
+
+```bash
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name interactive-agent \
+  --allowed-tools "Read,Write,Edit" \
+  --permission-mode default
+```
+
+**Dispatch a task (will prompt in interactive session)**
+
+```bash
+coord run "list files in current dir" --on interactive-agent --url ws://localhost:9999
+```
+
+Expected:
+- Task runs with interactive prompting (if Claude Code is in interactive mode)
+- Logs show mode=default
+
+**Test agent with mode=auto (headless)**
+
+```bash
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name headless-agent \
+  --allowed-tools "Read,Write,Edit" \
+  --permission-mode auto
+```
+
+**Dispatch a task (no prompting)**
+
+```bash
+coord run "create a test file" --on headless-agent --url ws://localhost:9999
+```
+
+Expected:
+- Task completes without interactive prompts
+- File is created (Write is pre-authorized)
+- Logs show mode=auto
+
+### 6. Test per-task restrictions
+
+Create two agents with different baseline permissions:
+
+```bash
+# Agent 1: Full access
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name full-agent \
+  --allowed-tools "Read,Write,Edit,Bash" \
+  --permission-mode auto &
+
+# Agent 2: Read-only
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name readonly-agent \
+  --allowed-tools "Read" \
+  --permission-mode auto &
+```
+
+**Dispatch to full-agent without restriction:**
+
+```bash
+coord run "create a new file" --on full-agent --url ws://localhost:9999
+```
+
+Expected: File is created (Write allowed)
+
+**Dispatch to readonly-agent (verify restriction):**
+
+```bash
+coord run "read a file" --on readonly-agent --url ws://localhost:9999 \
+  --allowed-tools "Read"
+```
+
+Expected: File is read (Read allowed)
+
+**Attempt write on readonly-agent:**
+
+```bash
+coord run "create a new file" --on readonly-agent --url ws://localhost:9999 \
+  --allowed-tools "Read"
+```
+
+Expected: Task runs but Write is denied; Claude should report insufficient permissions
+
+### 7. Test directory restrictions
+
+```bash
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name dir-agent \
+  --cwd /tmp \
+  --allowed-tools "Read,Write" \
+  --add-dirs "/var/log" \
+  --permission-mode auto
+```
+
+**Access allowed directory:**
+
+```bash
+coord run "list /var/log" --on dir-agent --url ws://localhost:9999 \
+  --add-dirs "/var/log"
+```
+
+Expected: Task succeeds
+
+**Attempt access outside allowed:**
+
+```bash
+coord run "list /root" --on dir-agent --url ws://localhost:9999
+```
+
+Expected: Task fails (directory not in allowed list)
+
+### 8. Test mutation-exclusive flags
+
+**Verify --dangerously-skip-permissions and permission flags are mutually exclusive:**
+
+```bash
+coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name conflict-agent \
+  --allowed-tools "Read" \
+  --dangerously-skip-permissions
+```
+
+Expected: Command fails with error about mutually exclusive flags
+
+### 9. Test permission matrix
+
+Test access to different tool categories:
+
+| Tool | Command | Expected |
+|------|---------|----------|
+| `Read` | `cat file.txt` | Success (if file exists) |
+| `Write` | `echo test > file.txt` | Success (if Write allowed) |
+| `Edit` | Claude edits file | Success (if Edit allowed) |
+| `Bash(git:*)` | `git status` | Success (if Bash(git:*) allowed) |
+| `Bash(cat:*)` | `cat file.txt` (via bash) | Success (if Bash(cat:*) allowed) |
+| `Bash` | `git push` | Success (if Bash allowed, denied if only Bash(git:*)) |
+
+**Test Bash scoping:**
+
+```bash
+# Agent with git-only bash
+COORD_LOG_LEVEL=info coord agent --url ws://localhost:9999 --token "$TOKEN" \
+  --name git-agent \
+  --allowed-tools "Read,Bash(git:*)" \
+  --permission-mode auto
+
+# This should work
+coord run "git status" --on git-agent --url ws://localhost:9999
+
+# This should fail (rm is not git)
+coord run "rm -rf ." --on git-agent --url ws://localhost:9999
+```
+
+Expected: git status succeeds, rm fails
+
+### 10. Test MCP permission parameters
+
+If MCP server is integrated, test permission parameters on `dispatch_task` tool:
+
+```bash
+# Start MCP server
+coord mcp --url ws://localhost:9999 &
+
+# In Claude Code, use:
+# dispatch_task(agentName="perm-agent", prompt="read a file", allowedTools="Read")
+```
+
+Expected:
+- Task dispatches with restricted permissions
+- Output contains file contents (Read allowed)
+
+### 11. Cleanup
+
+Stop all agents and the coordinator:
+
+```bash
+pkill coord
+```
+
+Verify all processes are terminated.
+
+### Permission Test Checklist
+
+- [ ] Agent starts with permission flags
+- [ ] Agent permissions shown in status
+- [ ] Task dispatches with baseline permissions
+- [ ] Per-task restrictions applied
+- [ ] Mode transitions work (default -> auto -> plan -> acceptEdits)
+- [ ] Directory restrictions enforced
+- [ ] Tool scoping enforced (Bash(git:*) vs Bash)
+- [ ] Mutually exclusive flags rejected
+- [ ] Permission matrix verified for all tool types
+- [ ] MCP permission parameters work (if integrated)
+- [ ] Logs show permission configuration at agent startup
+- [ ] Logs show permission application at task dispatch

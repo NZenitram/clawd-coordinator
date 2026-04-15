@@ -11,9 +11,16 @@ export const runCommand = new Command('run')
   .option('--url <url>', 'Coordinator URL')
   .option('--session <id>', 'Resume a specific Claude Code session')
   .option('--budget <usd>', 'Maximum budget in USD for this task')
-  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string; budget?: string }) => {
+  .option('--allowed-tools <tools>', 'Comma-separated tools to allow for this task')
+  .option('--disallowed-tools <tools>', 'Comma-separated tools to deny for this task')
+  .option('--add-dirs <dirs>', 'Comma-separated additional directories for this task')
+  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
+
+    const allowedTools = options.allowedTools ? options.allowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const disallowedTools = options.disallowedTools ? options.disallowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const addDirs = options.addDirs ? options.addDirs.split(',').map(s => s.trim()).filter(Boolean) : undefined;
 
     const ws = await connectCli(url, config.token);
     const response = await sendRequest(ws, 'dispatch-task', {
@@ -21,6 +28,9 @@ export const runCommand = new Command('run')
       prompt,
       sessionId: options.session,
       maxBudgetUsd: options.budget ? parseFloat(options.budget) : undefined,
+      allowedTools,
+      disallowedTools,
+      addDirs,
     });
 
     const payload = response.payload as any;

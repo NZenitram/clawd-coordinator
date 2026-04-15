@@ -89,6 +89,9 @@ export class CoordMcpServer {
             .positive()
             .optional()
             .describe('Maximum spend budget in USD for this task'),
+          allowedTools: z.array(z.string()).optional().describe('Tool names to allow for this task'),
+          disallowedTools: z.array(z.string()).optional().describe('Tool names to deny for this task'),
+          addDirs: z.array(z.string()).optional().describe('Additional directory paths to allow'),
         }),
       },
       async (args) => {
@@ -98,6 +101,9 @@ export class CoordMcpServer {
           prompt: args.prompt,
           sessionId: args.sessionId,
           maxBudgetUsd: args.maxBudgetUsd,
+          allowedTools: args.allowedTools,
+          disallowedTools: args.disallowedTools,
+          addDirs: args.addDirs,
         });
 
         const payload = response.payload as { data: unknown; error?: string };

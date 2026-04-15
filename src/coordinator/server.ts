@@ -387,10 +387,20 @@ export class Coordinator {
           }
           const rawMax = msg.payload.maxConcurrent;
           const maxConcurrent = (typeof rawMax === 'number' && Number.isInteger(rawMax) && rawMax >= 1 && rawMax <= 32) ? rawMax : 1;
+          const regAllowedTools = Array.isArray(msg.payload.allowedTools)
+            ? (msg.payload.allowedTools as unknown[]).filter((t): t is string => typeof t === 'string')
+            : undefined;
+          const regAddDirs = Array.isArray(msg.payload.addDirs)
+            ? (msg.payload.addDirs as unknown[]).filter((d): d is string => typeof d === 'string')
+            : undefined;
+          const regPermissionMode = typeof msg.payload.permissionMode === 'string' ? msg.payload.permissionMode : undefined;
           state.registry.register(requestedName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
             maxConcurrent,
+            allowedTools: regAllowedTools,
+            addDirs: regAddDirs,
+            permissionMode: regPermissionMode,
           });
           if (msg.payload.health) {
             state.registry.updateHealth(requestedName, {
@@ -704,6 +714,9 @@ export class Coordinator {
           prompt: task.prompt,
           sessionId: task.sessionId,
           traceId: task.traceId,
+          allowedTools: task.allowedTools,
+          disallowedTools: task.disallowedTools,
+          addDirs: task.addDirs,
         })));
       } else {
         logger.error({ agent: agentName, taskId }, 'Agent socket not open for queued dispatch');
@@ -782,7 +795,10 @@ export class Coordinator {
         const traceId = randomUUID();
         const rawBudget = args?.maxBudgetUsd;
         const maxBudgetUsd = (typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 && rawBudget <= 10000) ? rawBudget : undefined;
-        const task = this.tasks.create({ agentName, prompt, sessionId, traceId, ownerUserId: user.userId ?? undefined, orgId });
+        const taskAllowedTools = Array.isArray(args?.allowedTools) ? (args.allowedTools as unknown[]).filter((t): t is string => typeof t === 'string') : undefined;
+        const taskDisallowedTools = Array.isArray(args?.disallowedTools) ? (args.disallowedTools as unknown[]).filter((t): t is string => typeof t === 'string') : undefined;
+        const taskAddDirs = Array.isArray(args?.addDirs) ? (args.addDirs as unknown[]).filter((d): d is string => typeof d === 'string') : undefined;
+        const task = this.tasks.create({ agentName, prompt, sessionId, traceId, ownerUserId: user.userId ?? undefined, orgId, allowedTools: taskAllowedTools?.length ? taskAllowedTools : undefined, disallowedTools: taskDisallowedTools?.length ? taskDisallowedTools : undefined, addDirs: taskAddDirs?.length ? taskAddDirs : undefined });
         state.taskOwners.set(task.id, ws);
 
         if (!state.taskSubscribers.has(task.id)) {
@@ -816,6 +832,9 @@ export class Coordinator {
             sessionId,
             traceId,
             maxBudgetUsd,
+            allowedTools: task.allowedTools,
+            disallowedTools: task.disallowedTools,
+            addDirs: task.addDirs,
           })));
         } else {
           logger.error({ agent: agentName, taskId: task.id, traceId }, 'Agent socket not open, dispatch not delivered');

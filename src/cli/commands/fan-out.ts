@@ -9,10 +9,17 @@ export const fanOutCommand = new Command('fan-out')
   .requiredOption('--on <agents>', 'Comma-separated agent names')
   .option('--url <url>', 'Coordinator URL')
   .option('--budget <usd>', 'Maximum budget in USD per task')
-  .action(async (prompt: string, options: { on: string; url?: string; budget?: string }) => {
+  .option('--allowed-tools <tools>', 'Comma-separated tools to allow for this task')
+  .option('--disallowed-tools <tools>', 'Comma-separated tools to deny for this task')
+  .option('--add-dirs <dirs>', 'Comma-separated additional directories for this task')
+  .action(async (prompt: string, options: { on: string; url?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
     const agentNames = options.on.split(',').map(s => s.trim());
+
+    const allowedTools = options.allowedTools ? options.allowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const disallowedTools = options.disallowedTools ? options.disallowedTools.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const addDirs = options.addDirs ? options.addDirs.split(',').map(s => s.trim()).filter(Boolean) : undefined;
 
     const ws = await connectCli(url, config.token);
 
@@ -25,6 +32,9 @@ export const fanOutCommand = new Command('fan-out')
         agentName,
         prompt,
         maxBudgetUsd: options.budget ? parseFloat(options.budget) : undefined,
+        allowedTools,
+        disallowedTools,
+        addDirs,
       });
 
       const payload = response.payload as any;
