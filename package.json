@@ -1,6 +1,9 @@
 {
-  "name": "clawd-coordinator",
-  "version": "2026.4.15.2",
+  "name": "@soazcloud/clawd-coordinator",
+  "version": "2026.4.15.3",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Orchestrate remote Claude Code sessions across machines",
   "license": "MIT",
   "author": "SoazCloud (https://soazcloud.com)",
