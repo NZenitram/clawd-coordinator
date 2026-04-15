@@ -164,4 +164,71 @@ describe('AgentRegistry', () => {
     const staleAgents = registry.getStaleAgents(90000);
     expect(staleAgents).toHaveLength(0);
   });
+
+  // --- Pool tests ---
+
+  it('getPoolAgents returns only agents in the given pool', () => {
+    registry.register('pool-a-1', { os: 'linux', arch: 'x64', pool: 'staging' });
+    registry.register('pool-a-2', { os: 'linux', arch: 'x64', pool: 'staging' });
+    registry.register('pool-b-1', { os: 'linux', arch: 'x64', pool: 'production' });
+    registry.register('no-pool', { os: 'linux', arch: 'x64' });
+
+    const staging = registry.getPoolAgents('staging');
+    expect(staging).toHaveLength(2);
+    expect(staging.map(a => a.name).sort()).toEqual(['pool-a-1', 'pool-a-2']);
+
+    const production = registry.getPoolAgents('production');
+    expect(production).toHaveLength(1);
+    expect(production[0].name).toBe('pool-b-1');
+
+    expect(registry.getPoolAgents('nonexistent')).toHaveLength(0);
+  });
+
+  it('pickFromPool returns the least-loaded agent with capacity', () => {
+    registry.register('agent-a', { os: 'linux', arch: 'x64', pool: 'test-pool', maxConcurrent: 2 });
+    registry.register('agent-b', { os: 'linux', arch: 'x64', pool: 'test-pool', maxConcurrent: 2 });
+
+    // Both idle — picks the one with most recent heartbeat (both equal, first wins)
+    const first = registry.pickFromPool('test-pool');
+    expect(first).not.toBeNull();
+
+    // Give agent-a a task so agent-b has lower load
+    registry.tryAddTask('agent-a', 'task-1');
+    const picked = registry.pickFromPool('test-pool');
+    expect(picked).not.toBeNull();
+    expect(picked!.name).toBe('agent-b');
+  });
+
+  it('pickFromPool returns null when no agents have capacity', () => {
+    registry.register('full-agent', { os: 'linux', arch: 'x64', pool: 'full-pool', maxConcurrent: 1 });
+    registry.tryAddTask('full-agent', 'task-1');
+
+    expect(registry.pickFromPool('full-pool')).toBeNull();
+  });
+
+  it('pickFromPool ignores agents not in the requested pool', () => {
+    registry.register('other-pool-agent', { os: 'linux', arch: 'x64', pool: 'other' });
+    registry.register('no-pool-agent', { os: 'linux', arch: 'x64' });
+
+    expect(registry.pickFromPool('my-pool')).toBeNull();
+  });
+
+  it('stores pool field on registered agent', () => {
+    registry.register('pooled', { os: 'linux', arch: 'x64', pool: 'mypool' });
+    const agent = registry.get('pooled')!;
+    expect(agent.pool).toBe('mypool');
+  });
+
+  it('pickFromPool tiebreaks by most recent heartbeat', () => {
+    registry.register('agent-old', { os: 'linux', arch: 'x64', pool: 'hb-pool', maxConcurrent: 2 });
+    registry.register('agent-new', { os: 'linux', arch: 'x64', pool: 'hb-pool', maxConcurrent: 2 });
+
+    // Manually set heartbeats so agent-new has the most recent
+    registry.get('agent-old')!.lastHeartbeat = Date.now() - 10000;
+    registry.get('agent-new')!.lastHeartbeat = Date.now();
+
+    // Equal load (both idle), agent-new should win
+    const picked = registry.pickFromPool('hb-pool');
+    expect(picked!.name).toBe('agent-new');
+  });
 });

@@ -2,6 +2,21 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
+export interface AgentProfile {
+  url?: string;
+  token?: string;
+  name?: string;
+  cwd?: string;
+  dangerouslySkipPermissions?: boolean;
+  maxConcurrent?: number;
+  isolation?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  addDirs?: string[];
+  permissionMode?: string;
+  pool?: string;
+}
+
 export interface CoordConfig {
   token: string;
   coordinatorUrl?: string;
@@ -11,6 +26,7 @@ export interface CoordConfig {
     key: string;
   };
   agentTokens?: Record<string, string>;
+  agentProfiles?: Record<string, AgentProfile>;
 }
 
 const CONFIG_DIR = join(homedir(), '.coord');

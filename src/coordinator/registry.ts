@@ -17,12 +17,13 @@ export interface AgentInfo {
   allowedTools?: string[];
   addDirs?: string[];
   permissionMode?: string;
+  pool?: string;
 }
 
 export class AgentRegistry {
   private agents = new Map<string, AgentInfo>();
 
-  register(name: string, meta: { os: string; arch: string; coordVersion?: string; maxConcurrent?: number; allowedTools?: string[]; addDirs?: string[]; permissionMode?: string }): void {
+  register(name: string, meta: { os: string; arch: string; coordVersion?: string; maxConcurrent?: number; allowedTools?: string[]; addDirs?: string[]; permissionMode?: string; pool?: string }): void {
     if (this.agents.has(name)) {
       throw new Error(`Agent "${name}" is already registered`);
     }
@@ -40,6 +41,7 @@ export class AgentRegistry {
       allowedTools: meta.allowedTools,
       addDirs: meta.addDirs,
       permissionMode: meta.permissionMode,
+      pool: meta.pool,
     });
   }
 
@@ -123,5 +125,30 @@ export class AgentRegistry {
     return Array.from(this.agents.values()).filter(
       (a) => a.currentTaskIds.length > 0 && now - a.lastHeartbeat > busyTimeoutMs
     );
+  }
+
+  getPoolAgents(pool: string): AgentInfo[] {
+    return Array.from(this.agents.values()).filter((a) => a.pool === pool);
+  }
+
+  /**
+   * Picks the least-loaded agent in the pool that has remaining capacity.
+   * Least-loaded = lowest ratio of currentTaskIds.length / maxConcurrent.
+   * Tiebreak: most recent heartbeat (descending).
+   * Returns null when the pool is empty or all agents are at capacity.
+   */
+  pickFromPool(pool: string): AgentInfo | null {
+    const candidates = this.getPoolAgents(pool).filter(
+      (a) => a.currentTaskIds.length < a.maxConcurrent,
+    );
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      const loadA = a.currentTaskIds.length / a.maxConcurrent;
+      const loadB = b.currentTaskIds.length / b.maxConcurrent;
+      if (loadA !== loadB) return loadA - loadB;
+      // Tiebreak: most recent heartbeat first
+      return b.lastHeartbeat - a.lastHeartbeat;
+    });
+    return candidates[0];
   }
 }

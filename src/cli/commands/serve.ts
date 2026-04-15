@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { Coordinator, type CoordinatorOptions } from '../../coordinator/server.js';
 import { requireConfig, getConfigDir } from '../../shared/config.js';
 import { SqliteTaskStore } from '../../coordinator/sqlite-store.js';
+import { InMemoryScheduleStore } from '../../coordinator/scheduler.js';
 
 export const serveCommand = new Command('serve')
   .description('Start the coordination WebSocket server')
@@ -36,6 +37,10 @@ export const serveCommand = new Command('serve')
       coordinatorOptions.store = store;
       console.log(`Using SQLite storage at ${dbPath}`);
     }
+
+    // Always create an in-memory schedule store so REST endpoints are available
+    const scheduleStore = new InMemoryScheduleStore();
+    coordinatorOptions.scheduleStore = scheduleStore;
 
     const coordinator = new Coordinator(coordinatorOptions);
     await coordinator.start();

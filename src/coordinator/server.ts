@@ -37,6 +37,8 @@ import {
 } from '../protocol/messages.js';
 import { safeSend } from '../shared/ws-utils.js';
 import { RateLimiter } from '../shared/rate-limiter.js';
+import { Scheduler, type ScheduleStore } from './scheduler.js';
+import { InMemoryWebhookStore, type WebhookStore } from './webhook-store.js';
 
 const MAX_CONNECTIONS_PER_IP = 10;
 
@@ -72,6 +74,9 @@ export interface CoordinatorOptions {
   store?: TaskStore;
   queue?: TaskQueue;
   userStore?: UserStore;
+  scheduler?: Scheduler;
+  scheduleStore?: ScheduleStore;
+  webhookStore?: WebhookStore;
 }
 
 export const DEFAULT_ORG_ID = '__default__';
@@ -97,6 +102,8 @@ export class Coordinator {
   private stalenessTimer: ReturnType<typeof setInterval> | null = null;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduler: Scheduler | null = null;
+  private webhookStore: WebhookStore;
   private dedup = new MessageDeduplicator();
   private options: CoordinatorOptions;
   private ipConnectionCounts = new Map<string, number>();
@@ -139,8 +146,27 @@ export class Coordinator {
   constructor(options: CoordinatorOptions) {
     this.options = options;
     this.tasks = options.store ?? new TaskTracker();
+    this.webhookStore = options.webhookStore ?? new InMemoryWebhookStore();
     // Eagerly create the default org state
     this.getOrgState(DEFAULT_ORG_ID);
+
+    // Wire scheduler if a schedule store was provided or a custom scheduler was passed
+    if (options.scheduler) {
+      this.scheduler = options.scheduler;
+    } else if (options.scheduleStore) {
+      this.scheduler = new Scheduler(options.scheduleStore, (agentName, prompt, opts) => {
+        const orgId = opts?.orgId ?? DEFAULT_ORG_ID;
+        const task = this.tasks.create({
+          agentName,
+          prompt,
+          orgId,
+          allowedTools: opts?.allowedTools,
+        });
+        const activeQueue = this.getOrgState(orgId).queue;
+        activeQueue.enqueue(task.id, agentName);
+        logger.info({ taskId: task.id, agentName, orgId }, 'Scheduled task dispatched');
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -185,6 +211,8 @@ export class Coordinator {
         token: this.options.token,
         queue: this.getOrgState(DEFAULT_ORG_ID).queue,
         userStore: this.options.userStore,
+        scheduleStore: this.options.scheduleStore,
+        webhookStore: this.webhookStore,
         getOrgRegistry: (orgId: string) => this.getOrgState(orgId).registry,
         getOrgQueue: (orgId: string) => this.getOrgState(orgId).queue,
         relayAgentMessage: (fromAgent, toAgent, correlationId, topic, body) => {
@@ -216,6 +244,9 @@ export class Coordinator {
         httpServer.listen(this.options.port, () => resolve());
       }
       logger.info({ port: this.options.port }, 'Coordinator started');
+      if (this.scheduler) {
+        this.scheduler.start();
+      }
       this.wss.on('connection', (ws, req) => {
         this.handleConnection(ws, req);
       });
@@ -280,6 +311,9 @@ export class Coordinator {
   }
 
   async stop(): Promise<void> {
+    if (this.scheduler) {
+      this.scheduler.stop();
+    }
     this.transferManager.stop();
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
@@ -412,6 +446,7 @@ export class Coordinator {
             : undefined;
           const regPermissionMode = typeof msg.payload.permissionMode === 'string' ? msg.payload.permissionMode : undefined;
           const coordVersion = typeof msg.payload.coordVersion === 'string' ? msg.payload.coordVersion : undefined;
+          const regPool = typeof msg.payload.pool === 'string' && msg.payload.pool.length > 0 ? msg.payload.pool : undefined;
           state.registry.register(requestedName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
@@ -420,6 +455,7 @@ export class Coordinator {
             allowedTools: regAllowedTools,
             addDirs: regAddDirs,
             permissionMode: regPermissionMode,
+            pool: regPool,
           });
           if (msg.payload.health) {
             state.registry.updateHealth(requestedName, {
@@ -908,10 +944,22 @@ export class Coordinator {
         break;
       }
       case 'dispatch-task': {
-        const agentName = this.requireStringArg(args, 'agentName');
+        const pool = this.requireStringArg(args, 'pool');
+        let agentName = this.requireStringArg(args, 'agentName');
         const prompt = this.requireStringArg(args, 'prompt');
+
+        // Resolve agent from pool when pool is provided instead of agentName
+        if (pool) {
+          const picked = state.registry.pickFromPool(pool);
+          if (!picked) {
+            this.sendError(ws, requestId, `No available agents in pool "${pool}"`);
+            return;
+          }
+          agentName = picked.name;
+        }
+
         if (!agentName || !prompt) {
-          this.sendError(ws, requestId, 'Missing required arguments: agentName, prompt');
+          this.sendError(ws, requestId, 'Missing required arguments: agentName or pool, prompt');
           return;
         }
         const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : undefined;
@@ -947,7 +995,7 @@ export class Coordinator {
           logger.info({ agent: agentName, taskId: task.id, traceId, queueDepth: state.queue.depth() }, 'Task queued');
           ws.send(serializeMessage(createCliResponse({
             requestId,
-            data: { taskId: task.id, status: 'queued', queueDepth: state.queue.depth() },
+            data: { taskId: task.id, status: 'queued', queueDepth: state.queue.depth(), agentName },
           })));
           break;
         }
@@ -980,7 +1028,7 @@ export class Coordinator {
 
         ws.send(serializeMessage(createCliResponse({
           requestId,
-          data: { taskId: task.id, status: 'dispatched' },
+          data: { taskId: task.id, status: 'dispatched', agentName },
         })));
         break;
       }

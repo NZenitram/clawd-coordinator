@@ -240,4 +240,99 @@ describe('End-to-end dispatch', () => {
     agentWs.close();
     cliWs.close();
   });
+
+  it('dispatches with pool to the least-loaded available agent', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    // Connect two agents in the same pool
+    const connectPoolAgent = (name: string) =>
+      new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+          headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+        });
+        ws.on('open', () => {
+          ws.send(serializeMessage(createAgentRegister({
+            name,
+            os: 'linux',
+            arch: 'x64',
+            pool: 'staging',
+            maxConcurrent: 2,
+          })));
+          resolve(ws);
+        });
+        ws.on('error', reject);
+      });
+
+    const agent1Ws = await connectPoolAgent('pool-agent-1');
+    const agent2Ws = await connectPoolAgent('pool-agent-2');
+    await new Promise(r => setTimeout(r, 50));
+
+    // Both agents complete tasks immediately
+    for (const agentWs of [agent1Ws, agent2Ws]) {
+      agentWs.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (!msg || msg.type !== 'task:dispatch') return;
+        agentWs.send(serializeMessage(createTaskComplete({ taskId: msg.payload.taskId })));
+      });
+    }
+
+    const cliWs = await connectCli(`ws://localhost:${TEST_PORT}`, TEST_TOKEN);
+
+    // Dispatch via pool — should resolve to an available agent
+    const response = await sendRequest(cliWs, 'dispatch-task', {
+      pool: 'staging',
+      prompt: 'hello from pool',
+    });
+
+    const payload = (response.payload as any);
+    expect(payload.error).toBeUndefined();
+    expect(payload.data.taskId).toBeDefined();
+    expect(['pool-agent-1', 'pool-agent-2']).toContain(payload.data.agentName);
+
+    agent1Ws.close();
+    agent2Ws.close();
+    cliWs.close();
+  });
+
+  it('returns error when dispatching to pool with no available agents', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    // Connect an agent in the pool, fill its capacity
+    const agentWs = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+        headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+      });
+      ws.on('open', () => {
+        ws.send(serializeMessage(createAgentRegister({
+          name: 'full-pool-agent',
+          os: 'linux',
+          arch: 'x64',
+          pool: 'full-pool',
+          maxConcurrent: 1,
+        })));
+        resolve(ws);
+      });
+      ws.on('error', reject);
+    });
+    await new Promise(r => setTimeout(r, 50));
+
+    const cliWs = await connectCli(`ws://localhost:${TEST_PORT}`, TEST_TOKEN);
+
+    // Fill the single slot
+    await sendRequest(cliWs, 'dispatch-task', { agentName: 'full-pool-agent', prompt: 'fill slot' });
+
+    // Now dispatch via pool — all agents at capacity
+    const response = await sendRequest(cliWs, 'dispatch-task', {
+      pool: 'full-pool',
+      prompt: 'should fail',
+    });
+
+    const payload = (response.payload as any);
+    expect(payload.error).toContain('No available agents in pool');
+
+    agentWs.close();
+    cliWs.close();
+  });
 });

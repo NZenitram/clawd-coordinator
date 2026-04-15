@@ -50,6 +50,7 @@ export interface AgentDaemonOptions {
   disallowedTools?: string[];
   addDirs?: string[];
   permissionMode?: string;
+  pool?: string;
 }
 
 export class AgentDaemon {
@@ -147,6 +148,7 @@ export class AgentDaemon {
           allowedTools: this.options.allowedTools,
           addDirs: this.options.addDirs,
           permissionMode: this.options.permissionMode,
+          pool: this.options.pool,
         })));
 
         const interval = this.options.heartbeatIntervalMs ?? 30000;

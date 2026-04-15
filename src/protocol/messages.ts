@@ -27,6 +27,7 @@ export interface AgentRegisterPayload {
   allowedTools?: string[];
   addDirs?: string[];
   permissionMode?: string;
+  pool?: string;
 }
 
 export interface AgentHeartbeatPayload {

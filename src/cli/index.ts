@@ -20,6 +20,11 @@ import { transferCommand } from './commands/transfer.js';
 import { describeCommand } from './commands/describe.js';
 import { claudeMdCommand } from './commands/claude-md.js';
 import { selfUpdateCommand } from './commands/self-update.js';
+import { profilesCommand } from './commands/profiles.js';
+import { templatesCommand } from './commands/templates.js';
+import { scheduleCommand } from './commands/schedule.js';
+import { webhookCommand } from './commands/webhook.js';
+import { poolsCommand } from './commands/pools.js';
 
 const program = new Command();
 
@@ -50,5 +55,10 @@ program.addCommand(transferCommand);
 program.addCommand(describeCommand);
 program.addCommand(claudeMdCommand);
 program.addCommand(selfUpdateCommand);
+program.addCommand(profilesCommand);
+program.addCommand(templatesCommand);
+program.addCommand(scheduleCommand);
+program.addCommand(webhookCommand);
+program.addCommand(poolsCommand);
 
 program.parse();

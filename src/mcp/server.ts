@@ -79,9 +79,10 @@ export class CoordMcpServer {
     this.mcp.registerTool(
       'dispatch_task',
       {
-        description: 'Dispatch a prompt to a named remote agent and return the task ID',
+        description: 'Dispatch a prompt to a named remote agent (or pool) and return the task ID',
         inputSchema: z.object({
-          agentName: z.string().describe('Name of the target agent'),
+          agentName: z.string().optional().describe('Name of the target agent (mutually exclusive with pool)'),
+          pool: z.string().optional().describe('Agent pool name — least-loaded agent is selected automatically (mutually exclusive with agentName)'),
           prompt: z.string().describe('Prompt to send to the agent'),
           sessionId: z.string().optional().describe('Optional Claude Code session ID to resume'),
           maxBudgetUsd: z
@@ -95,9 +96,22 @@ export class CoordMcpServer {
         }),
       },
       async (args) => {
+        if (!args.agentName && !args.pool) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: agentName or pool is required' }],
+            isError: true,
+          };
+        }
+        if (args.agentName && args.pool) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: agentName and pool are mutually exclusive' }],
+            isError: true,
+          };
+        }
         const ws = await this.ensureConnected();
         const response = await sendRequest(ws, 'dispatch-task', {
           agentName: args.agentName,
+          pool: args.pool,
           prompt: args.prompt,
           sessionId: args.sessionId,
           maxBudgetUsd: args.maxBudgetUsd,
