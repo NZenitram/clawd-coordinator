@@ -36,6 +36,27 @@ export interface TaskDispatchPayload {
   sessionId: string | undefined;
   traceId?: string;
   maxBudgetUsd?: number;
+  retryAttempt?: number;
+}
+
+export interface AgentMessagePayload {
+  fromAgent: string;
+  toAgent: string;
+  correlationId: string;
+  topic: string;
+  body: string;
+}
+
+export interface AgentMessageReplyPayload {
+  fromAgent: string;
+  toAgent: string;
+  correlationId: string;
+  body: string;
+}
+
+export interface AgentMessageAckPayload {
+  correlationId: string;
+  status: 'delivered' | 'agent-offline' | 'unknown-agent';
 }
 
 export interface TaskOutputPayload {
@@ -97,6 +118,9 @@ export type CliRequest = Message<'cli:request', CliRequestPayload>;
 export type CliResponse = Message<'cli:response', CliResponsePayload>;
 export type SessionListRequest = Message<'session:list-request', SessionListRequestPayload>;
 export type SessionListResponse = Message<'session:list-response', SessionListResponsePayload>;
+export type AgentMessage = Message<'agent:message', AgentMessagePayload>;
+export type AgentMessageReply = Message<'agent:message-reply', AgentMessageReplyPayload>;
+export type AgentMessageAck = Message<'agent:message-ack', AgentMessageAckPayload>;
 
 export type AnyMessage =
   | AgentRegister
@@ -108,7 +132,10 @@ export type AnyMessage =
   | CliRequest
   | CliResponse
   | SessionListRequest
-  | SessionListResponse;
+  | SessionListResponse
+  | AgentMessage
+  | AgentMessageReply
+  | AgentMessageAck;
 
 // --- Factory functions ---
 
@@ -162,6 +189,18 @@ export function createSessionListResponse(payload: SessionListResponsePayload): 
   return makeMessage('session:list-response', payload);
 }
 
+export function createAgentMessage(payload: AgentMessagePayload): AgentMessage {
+  return makeMessage('agent:message', payload);
+}
+
+export function createAgentMessageReply(payload: AgentMessageReplyPayload): AgentMessageReply {
+  return makeMessage('agent:message-reply', payload);
+}
+
+export function createAgentMessageAck(payload: AgentMessageAckPayload): AgentMessageAck {
+  return makeMessage('agent:message-ack', payload);
+}
+
 // --- Serialization ---
 
 export function serializeMessage(msg: AnyMessage): string {
@@ -196,6 +235,7 @@ const VALID_TYPES = new Set([
   'task:dispatch', 'task:output', 'task:complete', 'task:error',
   'cli:request', 'cli:response',
   'session:list-request', 'session:list-response',
+  'agent:message', 'agent:message-reply', 'agent:message-ack',
 ]);
 
 export function parseMessage(raw: string): AnyMessage | null {

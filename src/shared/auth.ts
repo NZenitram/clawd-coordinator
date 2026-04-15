@@ -1,4 +1,4 @@
-import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHmac, createHash, timingSafeEqual } from 'node:crypto';
 
 const COMPARE_KEY = 'coord-token-compare';
 
@@ -20,4 +20,8 @@ export function validateToken(provided: string, expected: string): boolean {
   const a = createHmac('sha256', COMPARE_KEY).update(provided).digest();
   const b = createHmac('sha256', COMPARE_KEY).update(expected).digest();
   return timingSafeEqual(a, b);
+}
+
+export function hashApiKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
 }

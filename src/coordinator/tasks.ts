@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'error';
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'error' | 'dead-letter';
 
 export interface Task {
   id: string;
@@ -14,16 +14,21 @@ export interface Task {
   error?: string;
   createdAt: number;
   completedAt?: number;
+  retryCount: number;
+  maxRetries: number;
+  deadLettered: boolean;
+  ownerUserId?: string;
 }
 
 export interface TaskStore {
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string }): Task;
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task;
   get(id: string): Task | null;
   list(status?: TaskStatus): Task[];
   setRunning(id: string): void;
   appendOutput(id: string, data: string): boolean;
   setCompleted(id: string): void;
   setError(id: string, error: string): void;
+  setRetrying(id: string): void;
   cleanup(maxAgeMs: number): number;
 }
 
@@ -35,7 +40,7 @@ export class TaskTracker implements TaskStore {
     this.maxOutputLines = options?.maxOutputLines ?? 10000;
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task {
     const task: Task = {
       id: randomUUID(),
       agentName: params.agentName,
@@ -46,6 +51,10 @@ export class TaskTracker implements TaskStore {
       output: [],
       truncated: false,
       createdAt: Date.now(),
+      retryCount: 0,
+      maxRetries: params.maxRetries ?? 3,
+      deadLettered: false,
+      ownerUserId: params.ownerUserId,
     };
     this.tasks.set(task.id, task);
     return task;
@@ -100,12 +109,20 @@ export class TaskTracker implements TaskStore {
     }
   }
 
+  setRetrying(id: string): void {
+    const task = this.tasks.get(id);
+    if (task) {
+      task.retryCount++;
+      task.status = 'pending';
+    }
+  }
+
   cleanup(maxAgeMs: number): number {
     const now = Date.now();
     let removed = 0;
     for (const [id, task] of this.tasks) {
       if (
-        (task.status === 'completed' || task.status === 'error') &&
+        (task.status === 'completed' || task.status === 'error' || task.status === 'dead-letter') &&
         task.completedAt &&
         now - task.completedAt > maxAgeMs
       ) {

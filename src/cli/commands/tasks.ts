@@ -5,7 +5,7 @@ import { parseMessage } from '../../protocol/messages.js';
 
 const tasksListCommand = new Command('tasks')
   .description('List tasks')
-  .option('--status <status>', 'Filter by status (pending, running, completed, error)')
+  .option('--status <status>', 'Filter by status (pending, running, completed, error, dead-letter)')
   .option('--url <url>', 'Coordinator URL')
   .action(async (options: { status?: string; url?: string }) => {
     const config = requireConfig();

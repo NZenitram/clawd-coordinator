@@ -6,20 +6,48 @@ import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { AgentRegistry } from './registry.js';
 import { logger } from '../shared/logger.js';
+import { metrics } from '../shared/metrics.js';
 import { TaskTracker, type TaskStore, type TaskStatus } from './tasks.js';
 import { InMemoryTaskQueue, type TaskQueue } from './queue.js';
 import { validateToken, validateAgentToken } from '../shared/auth.js';
 import { createRestHandler } from './rest.js';
+import { type UserStore, type UserRole } from './user-store.js';
+import { checkPermission } from './rbac.js';
 import {
   parseMessage,
   serializeMessage,
   createTaskDispatch,
   createTaskError,
+  createTaskOutput,
   createCliResponse,
   createSessionListRequest,
+  createAgentMessage,
+  createAgentMessageAck,
   MessageDeduplicator,
   type AnyMessage,
 } from '../protocol/messages.js';
+import { safeSend } from '../shared/ws-utils.js';
+import { RateLimiter } from '../shared/rate-limiter.js';
+
+const MAX_CONNECTIONS_PER_IP = 10;
+
+const RETRYABLE_ERROR_PATTERNS = [
+  'disconnect',
+  'timeout',
+  'socket not open',
+  'capacity',
+  'unresponsive',
+];
+
+function isRetryableError(error: string): boolean {
+  const lower = error.toLowerCase();
+  return RETRYABLE_ERROR_PATTERNS.some(p => lower.includes(p));
+}
+// CLI connections: 100 messages/s; Agent connections: 500 messages/s
+const CLI_RATE_LIMIT_TOKENS = 100;
+const CLI_RATE_LIMIT_INTERVAL_MS = 1000;
+const AGENT_RATE_LIMIT_TOKENS = 500;
+const AGENT_RATE_LIMIT_INTERVAL_MS = 1000;
 
 export interface CoordinatorOptions {
   port: number;
@@ -34,6 +62,7 @@ export interface CoordinatorOptions {
   agentTokens?: Record<string, string>;
   store?: TaskStore;
   queue?: TaskQueue;
+  userStore?: UserStore;
 }
 
 export class Coordinator {
@@ -41,6 +70,7 @@ export class Coordinator {
   private httpsServer: HttpsServer | null = null;
   private httpServer: HttpServer | null = null;
   private httpConnections = new Set<import('node:net').Socket>();
+  private httpsConnections = new Set<import('node:stream').Duplex>();
   private registry = new AgentRegistry();
   private tasks: TaskStore;
   private agentSockets = new Map<string, WebSocket>();
@@ -55,6 +85,8 @@ export class Coordinator {
   private sessionListPending = new Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>();
   private queue: TaskQueue;
   private options: CoordinatorOptions;
+  private ipConnectionCounts = new Map<string, number>();
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(options: CoordinatorOptions) {
     this.options = options;
@@ -65,9 +97,32 @@ export class Coordinator {
   async start(): Promise<void> {
     return new Promise((resolve) => {
       const verifyClient = (info: { req: IncomingMessage }, cb: (result: boolean, code?: number, message?: string) => void) => {
+        const ip = info.req.socket.remoteAddress ?? 'unknown';
+        const connCount = this.ipConnectionCounts.get(ip) ?? 0;
+        if (connCount >= MAX_CONNECTIONS_PER_IP) {
+          logger.warn({ remoteAddress: ip, connCount }, 'Per-IP connection limit reached');
+          cb(false, 429, 'Too Many Connections');
+          return;
+        }
         const token = (info.req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
-        if (validateToken(token, this.options.token)) { cb(true); return; }
-        if (this.options.agentTokens && validateAgentToken(token, this.options.agentTokens)) { cb(true); return; }
+        // 1. Legacy shared token → admin (backward compat)
+        if (validateToken(token, this.options.token)) {
+          (info.req as any).__user = { userId: null, role: 'admin' as UserRole };
+          cb(true); return;
+        }
+        // 2. Per-agent tokens → admin
+        if (this.options.agentTokens && validateAgentToken(token, this.options.agentTokens)) {
+          (info.req as any).__user = { userId: null, role: 'admin' as UserRole };
+          cb(true); return;
+        }
+        // 3. User API key via UserStore
+        if (this.options.userStore) {
+          const resolved = this.options.userStore.resolveApiKey(token);
+          if (resolved) {
+            (info.req as any).__user = { userId: resolved.userId, role: resolved.role as UserRole };
+            cb(true); return;
+          }
+        }
         logger.warn({ remoteAddress: info.req.socket.remoteAddress }, 'Authentication failed');
         cb(false, 401, 'Unauthorized');
       };
@@ -77,6 +132,10 @@ export class Coordinator {
         registry: this.registry,
         token: this.options.token,
         queue: this.queue,
+        userStore: this.options.userStore,
+        relayAgentMessage: (fromAgent, toAgent, correlationId, topic, body) => {
+          return this.relayAgentMessageSync(fromAgent, toAgent, correlationId, topic, body);
+        },
       });
 
       if (this.options.tls) {
@@ -85,6 +144,10 @@ export class Coordinator {
           key: readFileSync(this.options.tls.key),
         }, restHandler);
         this.httpsServer = httpsServer;
+        httpsServer.on('connection', (socket) => {
+          this.httpsConnections.add(socket);
+          socket.on('close', () => this.httpsConnections.delete(socket));
+        });
         this.wss = new WebSocketServer({ server: httpsServer, maxPayload: 1 * 1024 * 1024, verifyClient });
         httpsServer.listen(this.options.port, () => resolve());
       } else {
@@ -129,21 +192,8 @@ export class Coordinator {
         }
         const deadBusy = this.registry.getDeadBusyAgents(300000); // 5 min
         for (const agent of deadBusy) {
-          for (const taskId of agent.currentTaskIds) {
-            this.tasks.setError(taskId, 'Agent became unresponsive');
-            const subs = this.taskSubscribers.get(taskId);
-            if (subs) {
-              const errMsg = serializeMessage(createTaskError({
-                taskId,
-                error: 'Agent became unresponsive',
-              }));
-              for (const cli of subs) {
-                if (cli.readyState === WebSocket.OPEN) {
-                  cli.send(errMsg);
-                }
-              }
-              this.taskSubscribers.delete(taskId);
-            }
+          for (const taskId of [...agent.currentTaskIds]) {
+            this.handleTaskFailure(taskId, agent.name, 'Agent became unresponsive');
           }
           const socket = this.agentSockets.get(agent.name);
           if (socket) socket.close(4002, 'Unresponsive busy agent');
@@ -183,6 +233,10 @@ export class Coordinator {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+    for (const timer of this.retryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.retryTimers.clear();
     if (!this.wss) return;
     for (const ws of this.agentSockets.values()) {
       ws.close();
@@ -193,6 +247,10 @@ export class Coordinator {
     return new Promise((resolve) => {
       this.wss!.close(() => {
         if (this.httpsServer) {
+          for (const socket of this.httpsConnections) {
+            socket.destroy();
+          }
+          this.httpsConnections.clear();
           this.httpsServer.close(() => resolve());
           this.httpsServer = null;
         } else if (this.httpServer) {
@@ -214,12 +272,30 @@ export class Coordinator {
     const url = new URL(req.url ?? '/', `http://localhost:${this.options.port}`);
     const path = url.pathname;
 
+    // Track per-IP connection count
+    const ip = req.socket.remoteAddress ?? 'unknown';
+    this.ipConnectionCounts.set(ip, (this.ipConnectionCounts.get(ip) ?? 0) + 1);
+    ws.on('close', () => {
+      const current = this.ipConnectionCounts.get(ip) ?? 1;
+      if (current <= 1) {
+        this.ipConnectionCounts.delete(ip);
+      } else {
+        this.ipConnectionCounts.set(ip, current - 1);
+      }
+    });
+
     (ws as any).__isAlive = true;
     ws.on('pong', () => { (ws as any).__isAlive = true; });
 
+    // Stash resolved user info on the socket for CLI permission checks
+    const user = (req as any).__user as { userId: string | null; role: UserRole } | undefined;
+    (ws as any).__user = user ?? { userId: null, role: 'admin' as UserRole };
+
     if (path === '/agent') {
+      (ws as any).__rateLimiter = new RateLimiter(AGENT_RATE_LIMIT_TOKENS, AGENT_RATE_LIMIT_INTERVAL_MS);
       this.handleAgentConnection(ws);
     } else if (path === '/cli') {
+      (ws as any).__rateLimiter = new RateLimiter(CLI_RATE_LIMIT_TOKENS, CLI_RATE_LIMIT_INTERVAL_MS);
       this.handleCliConnection(ws);
     } else {
       logger.warn({ path }, 'Unknown connection path');
@@ -231,6 +307,13 @@ export class Coordinator {
     let agentName: string | null = null;
 
     ws.on('message', (raw) => {
+      const limiter: RateLimiter | undefined = (ws as any).__rateLimiter;
+      if (limiter && !limiter.tryConsume()) {
+        logger.warn({ agent: agentName }, 'Agent rate limit exceeded');
+        ws.close(4008, 'Rate limit exceeded');
+        return;
+      }
+
       const msg = parseMessage(raw.toString());
       if (!msg) return;
       if (this.dedup.isDuplicate(msg.id)) return;
@@ -269,6 +352,7 @@ export class Coordinator {
           }
           this.agentSockets.set(requestedName, ws);
           agentName = requestedName;
+          metrics.incConnectedAgents();
           logger.info({ agent: agentName, os: msg.payload.os, arch: msg.payload.arch }, 'Agent registered');
           this.processQueue(requestedName);
           break;
@@ -294,9 +378,7 @@ export class Coordinator {
           if (subscribers) {
             const outMsg = serializeMessage(msg);
             for (const cli of subscribers) {
-              if (cli.readyState === WebSocket.OPEN) {
-                cli.send(outMsg);
-              }
+              safeSend(cli, outMsg);
             }
           }
           break;
@@ -307,6 +389,9 @@ export class Coordinator {
           if (!completeTask || completeTask.agentName !== agentName) return;
           logger.info({ taskId }, 'Task completed');
           this.tasks.setCompleted(taskId);
+          metrics.incCompleted();
+          metrics.observeTaskDuration(taskId);
+          metrics.setActiveTasks(this.countActiveTasks());
           if (agentName) {
             this.registry.removeTask(agentName, taskId);
             this.processQueue(agentName);
@@ -328,21 +413,10 @@ export class Coordinator {
           const errorTask = this.tasks.get(taskId);
           if (!errorTask || errorTask.agentName !== agentName) return;
           logger.error({ taskId, error }, 'Task failed');
-          this.tasks.setError(taskId, error);
-          if (agentName) {
-            this.registry.removeTask(agentName, taskId);
-            this.processQueue(agentName);
-          }
-          const errSubs = this.taskSubscribers.get(taskId);
-          if (errSubs) {
-            const errMsg = serializeMessage(msg);
-            for (const cli of errSubs) {
-              if (cli.readyState === WebSocket.OPEN) {
-                cli.send(errMsg);
-              }
-            }
-            this.taskSubscribers.delete(taskId);
-          }
+          metrics.incErrored();
+          metrics.observeTaskDuration(taskId);
+          metrics.setActiveTasks(this.countActiveTasks());
+          this.handleTaskFailure(taskId, agentName ?? '', error);
           break;
         }
         case 'session:list-response': {
@@ -361,6 +435,50 @@ export class Coordinator {
           }
           break;
         }
+        case 'agent:message': {
+          const { toAgent, correlationId } = msg.payload;
+          const targetSocket = this.agentSockets.get(toAgent);
+          if (!targetSocket) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'unknown-agent' })));
+            }
+            break;
+          }
+          if (targetSocket.readyState !== WebSocket.OPEN) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'agent-offline' })));
+            }
+            break;
+          }
+          targetSocket.send(serializeMessage(msg));
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'delivered' })));
+          }
+          logger.info({ from: msg.payload.fromAgent, to: toAgent, correlationId }, 'Agent message relayed');
+          break;
+        }
+        case 'agent:message-reply': {
+          const { toAgent, correlationId } = msg.payload;
+          const targetSocket = this.agentSockets.get(toAgent);
+          if (!targetSocket) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'unknown-agent' })));
+            }
+            break;
+          }
+          if (targetSocket.readyState !== WebSocket.OPEN) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'agent-offline' })));
+            }
+            break;
+          }
+          targetSocket.send(serializeMessage(msg));
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'delivered' })));
+          }
+          logger.info({ from: msg.payload.fromAgent, to: toAgent, correlationId }, 'Agent message-reply relayed');
+          break;
+        }
       }
     });
 
@@ -368,24 +486,12 @@ export class Coordinator {
       if (agentName) {
         const agent = this.registry.get(agentName);
         if (agent && agent.currentTaskIds.length > 0) {
-          for (const taskId of agent.currentTaskIds) {
-            this.tasks.setError(taskId, 'Agent disconnected while task was running');
-            const subs = this.taskSubscribers.get(taskId);
-            if (subs) {
-              const errMsg = serializeMessage(createTaskError({
-                taskId,
-                error: 'Agent disconnected while task was running',
-              }));
-              for (const cli of subs) {
-                if (cli.readyState === WebSocket.OPEN) {
-                  cli.send(errMsg);
-                }
-              }
-              this.taskSubscribers.delete(taskId);
-            }
+          for (const taskId of [...agent.currentTaskIds]) {
+            this.handleTaskFailure(taskId, agentName!, 'Agent disconnected while task was running');
           }
         }
         logger.info({ agent: agentName }, 'Agent disconnected');
+        metrics.decConnectedAgents();
         this.registry.unregister(agentName);
         this.agentSockets.delete(agentName);
       }
@@ -396,12 +502,20 @@ export class Coordinator {
     this.cliSockets.add(ws);
 
     ws.on('message', (raw) => {
+      const limiter: RateLimiter | undefined = (ws as any).__rateLimiter;
+      if (limiter && !limiter.tryConsume()) {
+        logger.warn({}, 'CLI rate limit exceeded');
+        ws.close(4008, 'Rate limit exceeded');
+        return;
+      }
+
       const msg = parseMessage(raw.toString());
       if (!msg) return;
       if (this.dedup.isDuplicate(msg.id)) return;
 
       if (msg.type === 'cli:request') {
-        this.handleCliRequest(ws, msg.id, msg.payload);
+        const user = (ws as any).__user as { userId: string | null; role: UserRole };
+        this.handleCliRequest(ws, msg.id, msg.payload, user);
       }
     });
 
@@ -427,6 +541,91 @@ export class Coordinator {
     });
   }
 
+  private countActiveTasks(): number {
+    return this.tasks.list('running').length;
+  }
+
+  /**
+   * Central failure handler. Determines whether to retry or dead-letter a task.
+   */
+  private handleTaskFailure(taskId: string, agentName: string, error: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    this.registry.removeTask(agentName, taskId);
+
+    // Only retry if the agent socket is still open (transient failure).
+    // If the socket is gone the agent disconnected and retrying to the same
+    // agent name would just enqueue to a ghost — fall through to dead-letter.
+    const agentSocket = this.agentSockets.get(agentName);
+    const agentSocketOpen = agentSocket !== undefined && agentSocket.readyState === WebSocket.OPEN;
+    if (agentSocketOpen && isRetryableError(error) && task.retryCount < task.maxRetries) {
+      const delay = Math.min(5000 * Math.pow(2, task.retryCount), 60000);
+      this.tasks.setRetrying(taskId);
+      logger.info({ taskId, retryCount: task.retryCount + 1, delay }, 'Scheduling task retry');
+
+      const retrySubs = this.taskSubscribers.get(taskId);
+      if (retrySubs) {
+        const retryNote = serializeMessage(createTaskOutput({
+          taskId,
+          data: `[coordinator] Task failed (${error}). Retrying in ${delay}ms (attempt ${task.retryCount + 1}/${task.maxRetries})...`,
+        }));
+        for (const cli of retrySubs) {
+          if (cli.readyState === WebSocket.OPEN) {
+            cli.send(retryNote);
+          }
+        }
+      }
+
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(taskId);
+        this.queue.enqueue(taskId, agentName);
+        this.processQueue(agentName);
+      }, delay);
+      this.retryTimers.set(taskId, timer);
+    } else {
+      // Dead-letter
+      const finalTask = this.tasks.get(taskId);
+      if (finalTask) {
+        finalTask.deadLettered = true;
+        finalTask.status = 'dead-letter';
+        finalTask.error = error;
+        finalTask.completedAt = Date.now();
+      }
+      logger.error({ taskId, error }, 'Task dead-lettered');
+
+      const dlSubs = this.taskSubscribers.get(taskId);
+      if (dlSubs) {
+        const errMsg = serializeMessage(createTaskError({ taskId, error }));
+        for (const cli of dlSubs) {
+          if (cli.readyState === WebSocket.OPEN) {
+            cli.send(errMsg);
+          }
+        }
+        this.taskSubscribers.delete(taskId);
+      }
+      this.processQueue(agentName);
+    }
+  }
+
+  /**
+   * Synchronous relay for the REST POST /api/message endpoint.
+   */
+  relayAgentMessageSync(
+    fromAgent: string,
+    toAgent: string,
+    correlationId: string,
+    topic: string,
+    body: string
+  ): { status: 'delivered' | 'agent-offline' | 'unknown-agent' } {
+    const targetSocket = this.agentSockets.get(toAgent);
+    if (!targetSocket) return { status: 'unknown-agent' };
+    if (targetSocket.readyState !== WebSocket.OPEN) return { status: 'agent-offline' };
+    targetSocket.send(serializeMessage(createAgentMessage({ fromAgent, toAgent, correlationId, topic, body })));
+    logger.info({ from: fromAgent, to: toAgent, correlationId }, 'Agent message relayed via REST');
+    return { status: 'delivered' };
+  }
+
   private processQueue(agentName: string): void {
     while (this.registry.hasCapacity(agentName)) {
       const taskId = this.queue.dequeue(agentName);
@@ -437,6 +636,10 @@ export class Coordinator {
 
       if (!this.registry.tryAddTask(agentName, task.id)) break;
 
+      metrics.incDispatched();
+      metrics.recordTaskStart(taskId);
+      metrics.setQueueDepth(this.queue.depth());
+      metrics.setActiveTasks(this.countActiveTasks() + 1);
       this.tasks.setRunning(taskId);
       logger.info({ agent: agentName, taskId, traceId: task.traceId }, 'Queued task dispatched');
 
@@ -450,8 +653,7 @@ export class Coordinator {
         })));
       } else {
         logger.error({ agent: agentName, taskId }, 'Agent socket not open for queued dispatch');
-        this.tasks.setError(taskId, 'Agent socket not open at dispatch time');
-        this.registry.removeTask(agentName, taskId);
+        this.handleTaskFailure(taskId, agentName, 'socket not open at dispatch time');
       }
     }
   }
@@ -469,9 +671,16 @@ export class Coordinator {
   private handleCliRequest(
     ws: WebSocket,
     requestId: string,
-    payload: { command: string; args?: Record<string, unknown> }
+    payload: { command: string; args?: Record<string, unknown> },
+    user: { userId: string | null; role: UserRole } = { userId: null, role: 'admin' }
   ): void {
     const { command, args } = payload;
+
+    // RBAC permission check
+    if (!checkPermission(user.role, command)) {
+      this.sendError(ws, requestId, 'Insufficient permissions');
+      return;
+    }
 
     switch (command) {
       case 'list-agents': {
@@ -517,7 +726,7 @@ export class Coordinator {
         const traceId = randomUUID();
         const rawBudget = args?.maxBudgetUsd;
         const maxBudgetUsd = (typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 && rawBudget <= 10000) ? rawBudget : undefined;
-        const task = this.tasks.create({ agentName, prompt, sessionId, traceId });
+        const task = this.tasks.create({ agentName, prompt, sessionId, traceId, ownerUserId: user.userId ?? undefined });
         this.taskOwners.set(task.id, ws);
 
         if (!this.taskSubscribers.has(task.id)) {
@@ -528,6 +737,7 @@ export class Coordinator {
         // Try immediate dispatch; if at capacity, queue the task
         if (!this.registry.tryAddTask(agentName, task.id)) {
           this.queue.enqueue(task.id, agentName);
+          metrics.setQueueDepth(this.queue.depth());
           logger.info({ agent: agentName, taskId: task.id, traceId, queueDepth: this.queue.depth() }, 'Task queued');
           ws.send(serializeMessage(createCliResponse({
             requestId,
@@ -536,6 +746,9 @@ export class Coordinator {
           break;
         }
 
+        metrics.incDispatched();
+        metrics.recordTaskStart(task.id);
+        metrics.setActiveTasks(this.countActiveTasks() + 1);
         this.tasks.setRunning(task.id);
         logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
 
@@ -563,7 +776,7 @@ export class Coordinator {
         break;
       }
       case 'list-tasks': {
-        const validStatuses: TaskStatus[] = ['pending', 'running', 'completed', 'error'];
+        const validStatuses: TaskStatus[] = ['pending', 'running', 'completed', 'error', 'dead-letter'];
         const statusArg = typeof args?.status === 'string' ? args.status : undefined;
         if (statusArg && !validStatuses.includes(statusArg as TaskStatus)) {
           this.sendError(ws, requestId, `Invalid status filter: ${statusArg}. Valid: ${validStatuses.join(', ')}`);

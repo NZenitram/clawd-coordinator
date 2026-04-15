@@ -102,6 +102,47 @@ describe('TaskTracker', () => {
     expect(smallTracker.get(task.id)!.output).toHaveLength(3); // 2 + marker
   });
 
+  it('creates task with default retryCount=0 maxRetries=3 deadLettered=false', () => {
+    const task = tracker.create({ agentName: 'a', prompt: 'p' });
+    expect(task.retryCount).toBe(0);
+    expect(task.maxRetries).toBe(3);
+    expect(task.deadLettered).toBe(false);
+  });
+
+  it('creates task with custom maxRetries', () => {
+    const task = tracker.create({ agentName: 'a', prompt: 'p', maxRetries: 5 });
+    expect(task.maxRetries).toBe(5);
+  });
+
+  it('setRetrying increments retryCount and resets status to pending', () => {
+    const task = tracker.create({ agentName: 'a', prompt: 'p' });
+    tracker.setRunning(task.id);
+    expect(tracker.get(task.id)!.status).toBe('running');
+    tracker.setRetrying(task.id);
+    const updated = tracker.get(task.id)!;
+    expect(updated.retryCount).toBe(1);
+    expect(updated.status).toBe('pending');
+  });
+
+  it('setRetrying increments count on each call', () => {
+    const task = tracker.create({ agentName: 'a', prompt: 'p' });
+    tracker.setRetrying(task.id);
+    tracker.setRetrying(task.id);
+    expect(tracker.get(task.id)!.retryCount).toBe(2);
+  });
+
+  it('lists tasks filtered by dead-letter status', () => {
+    const t1 = tracker.create({ agentName: 'a', prompt: 'p1', maxRetries: 0 });
+    tracker.create({ agentName: 'b', prompt: 'p2' });
+    // Manually dead-letter t1
+    const raw = tracker.get(t1.id)!;
+    raw.status = 'dead-letter';
+    raw.deadLettered = true;
+    raw.completedAt = Date.now();
+    expect(tracker.list('dead-letter')).toHaveLength(1);
+    expect(tracker.list('pending')).toHaveLength(1);
+  });
+
   it('cleans up old completed tasks', () => {
     const t1 = tracker.create({ agentName: 'a', prompt: 'p1' });
     const t2 = tracker.create({ agentName: 'b', prompt: 'p2' });

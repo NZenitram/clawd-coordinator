@@ -46,6 +46,43 @@ export class WorktreeStrategy implements IsolationStrategy {
     await execFile('git', ['worktree', 'remove', '--force', worktreePath], {});
     this.worktreePaths.delete(taskId);
   }
+
+  /**
+   * pruneOrphans — removes stale worktrees under <baseDir>/.worktrees/ that
+   * were left behind by SIGKILL or other unclean shutdowns.
+   * Errors on individual removals are swallowed so the agent can still start.
+   */
+  static async pruneOrphans(baseDir: string): Promise<void> {
+    const worktreesDir = join(baseDir, '.worktrees');
+    let stdout: string;
+    try {
+      ({ stdout } = await execFile('git', ['worktree', 'list', '--porcelain'], { cwd: baseDir }));
+    } catch {
+      // Not a git repo or git not available — nothing to prune
+      return;
+    }
+
+    const stale: string[] = [];
+    for (const line of stdout.split('\n')) {
+      const match = line.match(/^worktree (.+)$/);
+      if (match) {
+        const worktreePath = match[1].trim();
+        if (worktreePath.startsWith(worktreesDir + '/') || worktreePath.startsWith(worktreesDir + '\\')) {
+          stale.push(worktreePath);
+        }
+      }
+    }
+
+    for (const worktreePath of stale) {
+      try {
+        await execFile('git', ['worktree', 'remove', '--force', worktreePath], { cwd: baseDir });
+        const { logger } = await import('../shared/logger.js');
+        logger.info({ worktreePath }, 'Pruned orphan worktree');
+      } catch {
+        // Swallow individual removal errors
+      }
+    }
+  }
 }
 
 /**

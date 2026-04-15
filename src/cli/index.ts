@@ -10,6 +10,8 @@ import { fanOutCommand } from './commands/fan-out.js';
 import { tasksListCommand, attachCommand, resultCommand } from './commands/tasks.js';
 import { sessionsCommand, resumeCommand } from './commands/sessions.js';
 import { mcpCommand } from './commands/mcp.js';
+import { dashboardCommand } from './commands/dashboard.js';
+import { usersCommand } from './commands/users.js';
 
 const program = new Command();
 
@@ -30,5 +32,7 @@ program.addCommand(resultCommand);
 program.addCommand(sessionsCommand);
 program.addCommand(resumeCommand);
 program.addCommand(mcpCommand);
+program.addCommand(dashboardCommand);
+program.addCommand(usersCommand);
 
 program.parse();

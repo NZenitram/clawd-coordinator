@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import WebSocket from 'ws';
 import { Coordinator } from '../../src/coordinator/server.js';
+import { UserStore } from '../../src/coordinator/user-store.js';
 import {
   createAgentRegister,
   createAgentHeartbeat,
   createCliRequest,
+  createTaskError,
   serializeMessage,
   parseMessage,
 } from '../../src/protocol/messages.js';
@@ -297,5 +299,305 @@ describe('Coordinator', () => {
     agentWs.close();
     cli1.close();
     cli2.close();
+  });
+
+  // ── RBAC / UserStore integration ────────────────────────────────────────────
+
+  it('viewer cannot dispatch tasks (insufficient permissions)', async () => {
+    const userStore = await UserStore.create();
+    const user = userStore.createUser('viewer-user', 'viewer');
+    const { key } = userStore.createApiKey(user.id, 'test');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN, userStore });
+    await coordinator.start();
+
+    const agentWs = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+      headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      agentWs.on('open', () => {
+        agentWs.send(serializeMessage(createAgentRegister({ name: 'rbac-agent', os: 'linux', arch: 'x64' })));
+        setTimeout(resolve, 50);
+      });
+      agentWs.on('error', reject);
+    });
+
+    const viewerWs = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/cli`, {
+        headers: { 'authorization': `Bearer ${key}` },
+      });
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+
+    const response = await sendAndReceive(
+      viewerWs,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'rbac-agent', prompt: 'hello' } }))
+    );
+    const parsed = parseMessage(response);
+    expect((parsed!.payload as any).error).toBe('Insufficient permissions');
+
+    agentWs.close();
+    viewerWs.close();
+  });
+
+  it('operator can dispatch tasks', async () => {
+    const userStore = await UserStore.create();
+    const user = userStore.createUser('op-user', 'operator');
+    const { key } = userStore.createApiKey(user.id, 'test');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN, userStore });
+    await coordinator.start();
+
+    const agentWs = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+      headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      agentWs.on('open', () => {
+        agentWs.send(serializeMessage(createAgentRegister({ name: 'op-agent', os: 'linux', arch: 'x64' })));
+        setTimeout(resolve, 50);
+      });
+      agentWs.on('error', reject);
+    });
+
+    const opWs = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/cli`, {
+        headers: { 'authorization': `Bearer ${key}` },
+      });
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+
+    const response = await sendAndReceive(
+      opWs,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'op-agent', prompt: 'work' } }))
+    );
+    const parsed = parseMessage(response);
+    expect((parsed!.payload as any).error).toBeUndefined();
+    expect((parsed!.payload as any).data.taskId).toBeDefined();
+
+    agentWs.close();
+    opWs.close();
+  });
+
+  it('legacy shared token works as admin (backward compat)', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = new WebSocket(`ws://localhost:${TEST_PORT}/agent`, {
+      headers: { 'authorization': `Bearer ${TEST_TOKEN}` },
+    });
+    await new Promise<void>((resolve, reject) => {
+      agentWs.on('open', () => {
+        agentWs.send(serializeMessage(createAgentRegister({ name: 'legacy-agent', os: 'linux', arch: 'x64' })));
+        setTimeout(resolve, 50);
+      });
+      agentWs.on('error', reject);
+    });
+
+    const cli = await connectWs('/cli');
+    const response = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'legacy-agent', prompt: 'run' } }))
+    );
+    const parsed = parseMessage(response);
+    // Should succeed (no permission error)
+    expect((parsed!.payload as any).error).toBeUndefined();
+    expect((parsed!.payload as any).data.taskId).toBeDefined();
+
+    agentWs.close();
+    cli.close();
+  });
+
+  it('API key auth rejects bad key with 401', async () => {
+    const userStore = await UserStore.create();
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN, userStore });
+    await coordinator.start();
+
+    const ws = new WebSocket(`ws://localhost:${TEST_PORT}/cli`, {
+      headers: { 'authorization': 'Bearer not-a-valid-api-key' },
+    });
+    await new Promise<void>((resolve, reject) => {
+      ws.on('error', () => resolve()); // Should get 401
+      ws.on('open', () => reject(new Error('Should not have connected')));
+    });
+  });
+
+  // ── Retry / Dead-letter ─────────────────────────────────────────────────────
+
+  it('retryable error re-enqueues task instead of erroring', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    // Register agent — agent stays connected so retry is eligible
+    const agentWs = await connectWs('/agent');
+    agentWs.send(serializeMessage(createAgentRegister({ name: 'retry-agent', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Dispatch task — this sets status to 'running'
+    const cli = await connectWs('/cli');
+    const dispatchResp = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'retry-agent', prompt: 'work' } }))
+    );
+    const taskId = (parseMessage(dispatchResp)!.payload as any).data.taskId;
+
+    // Agent sends a retryable error (capacity-related)
+    agentWs.send(serializeMessage(createTaskError({ taskId, error: 'Agent at local capacity (1/1)' })));
+    // Give coordinator time to process error and schedule retry
+    await new Promise(r => setTimeout(r, 100));
+
+    // Task should be in pending (retrying) state, not error
+    const taskResp = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'get-task', args: { taskId } }))
+    );
+    const task = (parseMessage(taskResp)!.payload as any).data.task;
+    expect(task.status).toBe('pending');
+    expect(task.retryCount).toBe(1);
+
+    agentWs.close();
+    cli.close();
+  });
+
+  it('non-retryable error dead-letters the task', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentWs = await connectWs('/agent');
+    agentWs.send(serializeMessage(createAgentRegister({ name: 'dl-agent', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    const cli = await connectWs('/cli');
+    const dispatchResp = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'dispatch-task', args: { agentName: 'dl-agent', prompt: 'work' } }))
+    );
+    const taskId = (parseMessage(dispatchResp)!.payload as any).data.taskId;
+
+    // Agent sends a non-retryable error
+    agentWs.send(serializeMessage(createTaskError({ taskId, error: 'Claude exited with code 1: fatal error' })));
+
+    // Wait for task:error from coordinator
+    const errorMsg = await new Promise<string>((resolve) => {
+      cli.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg?.type === 'task:error' && (msg.payload as any).taskId === taskId) {
+          resolve((msg.payload as any).error);
+        }
+      });
+    });
+    expect(errorMsg).toContain('fatal error');
+
+    // Task should be dead-lettered
+    const taskResp = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'get-task', args: { taskId } }))
+    );
+    const task = (parseMessage(taskResp)!.payload as any).data.task;
+    expect(task.status).toBe('dead-letter');
+    expect(task.deadLettered).toBe(true);
+
+    agentWs.close();
+    cli.close();
+  });
+
+  it('list-tasks accepts dead-letter status filter', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const cli = await connectWs('/cli');
+    const response = await sendAndReceive(
+      cli,
+      serializeMessage(createCliRequest({ command: 'list-tasks', args: { status: 'dead-letter' } }))
+    );
+    const parsed = parseMessage(response);
+    expect((parsed!.payload as any).error).toBeUndefined();
+    expect(Array.isArray((parsed!.payload as any).data.tasks)).toBe(true);
+
+    cli.close();
+  });
+
+  // ── Agent-to-agent messaging ─────────────────────────────────────────────────
+
+  it('relays agent:message between two agents', async () => {
+    const { createAgentMessage } = await import('../../src/protocol/messages.js');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentA = await connectWs('/agent');
+    agentA.send(serializeMessage(createAgentRegister({ name: 'agent-a', os: 'linux', arch: 'x64' })));
+    const agentB = await connectWs('/agent');
+    agentB.send(serializeMessage(createAgentRegister({ name: 'agent-b', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Collect messages on agentB
+    const bMessages: string[] = [];
+    agentB.on('message', (raw) => bMessages.push(raw.toString()));
+
+    // Collect ack messages on agentA
+    const aMessages: string[] = [];
+    agentA.on('message', (raw) => aMessages.push(raw.toString()));
+
+    const correlationId = 'test-corr-123';
+    agentA.send(serializeMessage(createAgentMessage({
+      fromAgent: 'agent-a',
+      toAgent: 'agent-b',
+      correlationId,
+      topic: 'greeting',
+      body: 'hello!',
+    })));
+
+    // Wait for relay
+    await new Promise(r => setTimeout(r, 100));
+
+    // agentB should have received the message
+    const relayedMsgs = bMessages.map(m => parseMessage(m)).filter(m => m?.type === 'agent:message');
+    expect(relayedMsgs).toHaveLength(1);
+    expect((relayedMsgs[0]!.payload as any).fromAgent).toBe('agent-a');
+    expect((relayedMsgs[0]!.payload as any).body).toBe('hello!');
+
+    // agentA should have received an ack with 'delivered'
+    const acks = aMessages.map(m => parseMessage(m)).filter(m => m?.type === 'agent:message-ack');
+    expect(acks).toHaveLength(1);
+    expect((acks[0]!.payload as any).status).toBe('delivered');
+    expect((acks[0]!.payload as any).correlationId).toBe(correlationId);
+
+    agentA.close();
+    agentB.close();
+  });
+
+  it('sends unknown-agent ack when target agent is not registered', async () => {
+    const { createAgentMessage } = await import('../../src/protocol/messages.js');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agentA = await connectWs('/agent');
+    agentA.send(serializeMessage(createAgentRegister({ name: 'sender-agent', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    const ackPromise = new Promise<string>((resolve) => {
+      agentA.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg?.type === 'agent:message-ack') {
+          resolve((msg.payload as any).status);
+        }
+      });
+    });
+
+    agentA.send(serializeMessage(createAgentMessage({
+      fromAgent: 'sender-agent',
+      toAgent: 'nonexistent-agent',
+      correlationId: 'corr-999',
+      topic: 'test',
+      body: 'ping',
+    })));
+
+    const ackStatus = await ackPromise;
+    expect(ackStatus).toBe('unknown-agent');
+
+    agentA.close();
   });
 });

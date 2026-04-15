@@ -14,7 +14,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   error TEXT,
   truncated INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  completed_at INTEGER
+  completed_at INTEGER,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 3,
+  dead_lettered INTEGER NOT NULL DEFAULT 0,
+  owner_user_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_output (
@@ -58,12 +62,14 @@ export class SqliteTaskStore implements TaskStore {
     }
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task {
     const id = randomUUID();
     const now = Date.now();
+    const maxRetries = params.maxRetries ?? 3;
     this.db.run(
-      'INSERT INTO tasks (id, agent_name, prompt, session_id, trace_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, params.agentName, params.prompt, params.sessionId ?? null, params.traceId ?? null, 'pending', now]
+      `INSERT INTO tasks (id, agent_name, prompt, session_id, trace_id, status, created_at, retry_count, max_retries, dead_lettered, owner_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, params.agentName, params.prompt, params.sessionId ?? null, params.traceId ?? null, 'pending', now, 0, maxRetries, 0, params.ownerUserId ?? null]
     );
     this.save();
     return {
@@ -76,6 +82,10 @@ export class SqliteTaskStore implements TaskStore {
       output: [],
       truncated: false,
       createdAt: now,
+      retryCount: 0,
+      maxRetries,
+      deadLettered: false,
+      ownerUserId: params.ownerUserId,
     };
   }
 
@@ -161,6 +171,11 @@ export class SqliteTaskStore implements TaskStore {
     this.save();
   }
 
+  setRetrying(id: string): void {
+    this.db.run('UPDATE tasks SET status = ?, retry_count = retry_count + 1 WHERE id = ?', ['pending', id]);
+    this.save();
+  }
+
   cleanup(maxAgeMs: number): number {
     const cutoff = Date.now() - maxAgeMs;
     // Get task IDs to delete
@@ -221,6 +236,10 @@ export class SqliteTaskStore implements TaskStore {
       truncated: (row.truncated as number) === 1,
       createdAt: row.created_at as number,
       completedAt: (row.completed_at as number) ?? undefined,
+      retryCount: (row.retry_count as number) ?? 0,
+      maxRetries: (row.max_retries as number) ?? 3,
+      deadLettered: (row.dead_lettered as number) === 1,
+      ownerUserId: (row.owner_user_id as string) ?? undefined,
     };
   }
 }

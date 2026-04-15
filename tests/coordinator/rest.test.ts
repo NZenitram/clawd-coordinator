@@ -129,6 +129,12 @@ describe('REST API', () => {
     expect((res.body as any).error).toContain('Invalid status filter');
   });
 
+  it('GET /api/tasks?status=dead-letter returns 200 with empty list initially', async () => {
+    const res = await request('GET', '/api/tasks?status=dead-letter', { token: TEST_TOKEN });
+    expect(res.statusCode).toBe(200);
+    expect((res.body as any).tasks).toEqual([]);
+  });
+
   // ── GET /api/tasks/:id ──────────────────────────────────────────────────────
 
   it('GET /api/tasks/:id returns task by ID', async () => {
@@ -238,6 +244,32 @@ describe('REST API', () => {
     });
     expect(res.statusCode).toBe(400);
     expect((res.body as any).error).toContain('Invalid JSON');
+  });
+
+  // ── POST /api/message ───────────────────────────────────────────────────────
+
+  it('POST /api/message returns unknown-agent when target not connected', async () => {
+    const res = await request('POST', '/api/message', {
+      token: TEST_TOKEN,
+      body: {
+        fromAgent: 'rest-sender',
+        toAgent: 'nonexistent-agent',
+        topic: 'test',
+        body: 'hello',
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.body as any).status).toBe('unknown-agent');
+    expect(typeof (res.body as any).correlationId).toBe('string');
+  });
+
+  it('POST /api/message returns 400 when required fields are missing', async () => {
+    const res = await request('POST', '/api/message', {
+      token: TEST_TOKEN,
+      body: { fromAgent: 'a', toAgent: 'b' }, // missing topic and body
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.body as any).error).toContain('Missing required fields');
   });
 
   // ── Unknown routes ──────────────────────────────────────────────────────────

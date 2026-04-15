@@ -4,8 +4,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
-import { createIsolationStrategy, type IsolationMode, type IsolationStrategy } from './isolation.js';
+import { createIsolationStrategy, WorktreeStrategy, type IsolationMode, type IsolationStrategy } from './isolation.js';
 import { logger } from '../shared/logger.js';
+import { safeSend } from '../shared/ws-utils.js';
 import {
   parseMessage,
   serializeMessage,
@@ -58,6 +59,11 @@ export class AgentDaemon {
     const health = await checkClaudeHealth();
     this.lastHealth = { claudeAvailable: health.available, version: health.version };
     logger.info({ health: this.lastHealth }, 'Initial health check');
+
+    if (this.options.isolation === 'worktree') {
+      const workingDir = this.options.workingDirectory ?? process.cwd();
+      await WorktreeStrategy.pruneOrphans(workingDir);
+    }
 
     await this.connect();
 
@@ -175,6 +181,24 @@ export class AgentDaemon {
         } else if (msg.type === 'session:list-request') {
           const { agentName, requestId } = msg.payload as { agentName: string; requestId: string };
           this.handleSessionListRequest(agentName, requestId);
+        } else if (msg.type === 'agent:message') {
+          const { fromAgent, correlationId, topic, body } = msg.payload;
+          logger.info({ from: fromAgent, correlationId, topic }, 'Received agent message');
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(serializeMessage(createTaskOutput({
+              taskId: correlationId,
+              data: `[agent-message] from=${fromAgent} topic=${topic}: ${body}`,
+            })));
+          }
+        } else if (msg.type === 'agent:message-reply') {
+          const { fromAgent, correlationId, body } = msg.payload;
+          logger.info({ from: fromAgent, correlationId }, 'Received agent message-reply');
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(serializeMessage(createTaskOutput({
+              taskId: correlationId,
+              data: `[agent-message-reply] from=${fromAgent}: ${body}`,
+            })));
+          }
         }
       });
 
@@ -275,8 +299,8 @@ export class AgentDaemon {
         dangerouslySkipPermissions: this.options.dangerouslySkipPermissions,
         maxBudgetUsd,
         onOutput: (data) => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(serializeMessage(createTaskOutput({ taskId, data, traceId })));
+          if (this.ws) {
+            safeSend(this.ws, serializeMessage(createTaskOutput({ taskId, data, traceId })));
           }
         },
         onError: (data) => {

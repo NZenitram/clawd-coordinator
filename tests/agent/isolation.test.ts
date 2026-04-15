@@ -214,6 +214,122 @@ describe('TempDirStrategy', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WorktreeStrategy.pruneOrphans
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('WorktreeStrategy.pruneOrphans', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (execFile as any).mockImplementation((...args: any[]) => {
+      const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(null, { stdout: '', stderr: '' });
+    });
+  });
+
+  it('does nothing when git worktree list returns no .worktrees paths', async () => {
+    // porcelain output with no worktrees under baseDir/.worktrees/
+    const porcelain = [
+      'worktree /repo',
+      'HEAD abc123',
+      'branch refs/heads/main',
+      '',
+    ].join('\n');
+
+    (execFile as any).mockImplementationOnce((...args: any[]) => {
+      const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(null, { stdout: porcelain, stderr: '' });
+    });
+
+    await WorktreeStrategy.pruneOrphans('/repo');
+
+    // Only the list call — no remove calls
+    expect(execFile).toHaveBeenCalledTimes(1);
+    expect(execFile).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'list', '--porcelain'],
+      { cwd: '/repo' },
+      expect.any(Function),
+    );
+  });
+
+  it('removes stale worktrees found under .worktrees/', async () => {
+    const porcelain = [
+      'worktree /repo',
+      'HEAD abc123',
+      'branch refs/heads/main',
+      '',
+      'worktree /repo/.worktrees/task-orphan-1',
+      'HEAD def456',
+      'detached',
+      '',
+      'worktree /repo/.worktrees/task-orphan-2',
+      'HEAD ghi789',
+      'detached',
+      '',
+    ].join('\n');
+
+    // First call = git worktree list; subsequent = git worktree remove
+    (execFile as any)
+      .mockImplementationOnce((...args: any[]) => {
+        const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+        if (cb) cb(null, { stdout: porcelain, stderr: '' });
+      })
+      .mockImplementation((...args: any[]) => {
+        const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+        if (cb) cb(null, { stdout: '', stderr: '' });
+      });
+
+    await WorktreeStrategy.pruneOrphans('/repo');
+
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(execFile).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '--force', '/repo/.worktrees/task-orphan-1'],
+      { cwd: '/repo' },
+      expect.any(Function),
+    );
+    expect(execFile).toHaveBeenCalledWith(
+      'git',
+      ['worktree', 'remove', '--force', '/repo/.worktrees/task-orphan-2'],
+      { cwd: '/repo' },
+      expect.any(Function),
+    );
+  });
+
+  it('swallows errors on individual worktree removal failures', async () => {
+    const porcelain = [
+      'worktree /repo/.worktrees/task-bad',
+      'HEAD abc123',
+      'detached',
+      '',
+    ].join('\n');
+
+    (execFile as any)
+      .mockImplementationOnce((...args: any[]) => {
+        const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+        if (cb) cb(null, { stdout: porcelain, stderr: '' });
+      })
+      .mockImplementationOnce((...args: any[]) => {
+        const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+        if (cb) cb(new Error('worktree locked'));
+      });
+
+    // Must resolve without throwing
+    await expect(WorktreeStrategy.pruneOrphans('/repo')).resolves.toBeUndefined();
+  });
+
+  it('returns early when git worktree list fails (not a git repo)', async () => {
+    (execFile as any).mockImplementationOnce((...args: any[]) => {
+      const cb: Function = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
+      if (cb) cb(new Error('not a git repository'));
+    });
+
+    await expect(WorktreeStrategy.pruneOrphans('/not-a-repo')).resolves.toBeUndefined();
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // createIsolationStrategy factory
 // ─────────────────────────────────────────────────────────────────────────────
 
