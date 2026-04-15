@@ -6,9 +6,35 @@ SQLite persistence, per-agent concurrency control, workspace isolation, task que
 
 ## Quick Start
 
+### Platform Support
+
+Clawd Coordinator runs on:
+- **Windows 10+** — PowerShell, Windows Terminal, or cmd.exe
+- **macOS 12+** — Terminal, iTerm2, or other shell
+- **Linux** — Any distro with Node.js 18+
+- **WSL** — Windows Subsystem for Linux (treated as Linux)
+
 ### 1. Install
 
-From git (current):
+#### From npm (recommended)
+
+**Windows (PowerShell):**
+```powershell
+npm install -g clawd-coordinator
+```
+
+**macOS (Terminal):**
+```bash
+npm install -g clawd-coordinator
+```
+
+**Linux (bash):**
+```bash
+npm install -g clawd-coordinator
+```
+
+#### From git (development)
+
 ```bash
 git clone https://github.com/NZenitram/clawd-coordinator.git
 cd clawd-coordinator
@@ -16,12 +42,38 @@ npm install && npm run build
 npm link  # makes `coord` available globally
 ```
 
-From npm (once published):
-```bash
-npm install -g clawd-coordinator
+### 2. Setup the machine
+
+Run the setup command, which checks for dependencies and helps install missing ones:
+
+**Windows:**
+```powershell
+coord setup
 ```
 
-### 2. Initialize
+**macOS:**
+```bash
+coord setup
+```
+
+**Linux:**
+```bash
+coord setup
+```
+
+The setup command will:
+- Verify Node.js >= 18
+- Check for git (install via brew/apt/dnf/yum/winget if needed)
+- Check for Claude Code (install via npm if needed)
+- Verify Anthropic API authentication
+- Save configuration to `~/.coord/config.json`
+
+Use `--yes` flag to accept all defaults without prompting:
+```bash
+coord setup --yes
+```
+
+### 3. Initialize
 
 ```bash
 coord init
@@ -118,6 +170,7 @@ Local Machine                          Remote Machines
 
 | Command | Description | Key Flags |
 |---------|-------------|-----------|
+| `coord setup` | Check dependencies and set up machine for agent role | `--yes`, `--url`, `--token`, `--name`, `--profile` |
 | `coord init` | Generate config and auth token | `--force`, `--show-token` |
 | `coord serve` | Start coordinator WebSocket server | `-p, --port`, `--tls-cert`, `--tls-key`, `--storage`, `--db-path` |
 | `coord agent` | Start remote agent daemon | `--url`, `--token`, `--name`, `--cwd`, `--max-concurrent`, `--isolation`, `--allowed-tools`, `--disallowed-tools`, `--add-dirs`, `--permission-mode` |
@@ -953,6 +1006,55 @@ All tests must pass before committing:
 ```bash
 npm test && npm run lint && npm run build
 ```
+
+## Platform Support Matrix
+
+### Operating Systems
+
+| OS | Version | Shell | Status |
+|----|---------|----|--------|
+| Windows | 10 or later | PowerShell, Windows Terminal, cmd.exe | Fully supported |
+| Windows | WSL2 | bash, zsh | Fully supported (as Linux) |
+| macOS | 12+ (Monterey or later) | Terminal, iTerm2, zsh | Fully supported |
+| Linux | Any with Node 18+ | bash, zsh, fish | Fully supported |
+| FreeBSD | Current | bash, zsh | Partial (untested) |
+
+### Prerequisites per Platform
+
+**Windows 10+:**
+- Node.js 18+ (install via [nodejs.org](https://nodejs.org) or `winget install nodejs`)
+- Git (install via `winget install git` or [git-scm.com](https://git-scm.com))
+- Claude Code (install via `npm install -g @anthropic-ai/claude-code`)
+- PowerShell or Windows Terminal recommended for better Unicode support
+
+**macOS 12+:**
+- Node.js 18+ (install via [nodejs.org](https://nodejs.org) or `brew install node`)
+- Git (usually pre-installed; `brew install git` if needed)
+- Claude Code (install via `npm install -g @anthropic-ai/claude-code`)
+- Xcode Command Line Tools (`xcode-select --install` if prompted)
+
+**Linux (any distro):**
+- Node.js 18+ (use your distro's package manager or [nodejs.org](https://nodejs.org))
+- Git (install via `apt`, `dnf`, `yum`, `pacman`, etc.)
+- Claude Code (install via `npm install -g @anthropic-ai/claude-code`)
+- Build tools may be needed for native npm modules (gcc, make, python3)
+
+**WSL (Windows Subsystem for Linux):**
+- Behaves like Linux; install prerequisites using Linux package manager
+- Can invoke Windows `cmd.exe` or PowerShell from within WSL if needed
+
+### Automated Setup
+
+The `coord setup` command detects your platform and helps install missing dependencies:
+
+```bash
+coord setup
+```
+
+Supported package managers:
+- **macOS:** homebrew (`brew`)
+- **Linux:** apt, dnf, yum (automatically detected)
+- **Windows:** winget, chocolatey (automatically detected)
 
 ## License
 

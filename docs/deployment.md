@@ -2,14 +2,36 @@
 
 ## Prerequisites
 
-**Coordinator machine (local):**
-- Node.js >= 18
-- [Tailscale](https://tailscale.com/) installed (for exposing the coordinator without public IPs)
+### Coordinator Machine
 
-**Each remote agent machine:**
+**All platforms:**
 - Node.js >= 18
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude` available in PATH)
-- Network access to the coordinator (outbound only -- no inbound ports needed)
+- npm or yarn
+- Network access to remote agent machines (inbound on port 8080 or custom port)
+
+**Optional:**
+- [Tailscale](https://tailscale.com/) for secure, public exposure without TLS certificates
+- TLS certificates (for direct HTTPS)
+
+### Remote Agent Machines
+
+**All platforms:**
+- Node.js >= 18
+- npm or yarn
+- Git
+- Claude Code installed and authenticated
+- Network access to coordinator (outbound only -- no inbound ports needed on agent)
+- ANTHROPIC_API_KEY environment variable set or authenticated via `claude` OAuth
+
+## Platform-Specific Installation
+
+Use `coord setup` to automatically detect and install missing dependencies:
+
+```bash
+coord setup
+```
+
+This command checks for Node.js, git, Claude Code, and authentication, then offers to install missing components. Alternatively, follow the manual setup for your platform below.
 
 ## Install clawd-coordinator
 
