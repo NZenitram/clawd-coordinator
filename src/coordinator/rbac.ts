@@ -11,6 +11,10 @@ const PERMISSIONS: Record<UserRole, Set<string>> = {
     'get-agent',
     'list-sessions',
     'send-message',
+    'push-file',
+    'pull-file',
+    'transfer-file',
+    'list-transfers',
   ]),
   viewer: new Set([
     'list-tasks',

@@ -1,7 +1,166 @@
 import { Command } from 'commander';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { requireConfig } from '../../shared/config.js';
 import { connectCli, sendRequest } from '../output.js';
-import { parseMessage } from '../../protocol/messages.js';
+import { parseMessage, serializeMessage, createFileChunk, createFileTransferStart, createFileTransferComplete, createFileChunkAck, type FileTransferStartPayload, type FileChunkPayload, type FileTransferCompletePayload, type FileChunkAckPayload } from '../../protocol/messages.js';
+import WebSocket from 'ws';
+import { spawn } from 'node:child_process';
+
+const CHUNK_SIZE = 512 * 1024;
+
+function waitForFileAck(ws: WebSocket, transferId: string, chunkIndex: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const listener = (raw: Buffer | string) => {
+      const msg = parseMessage(raw.toString());
+      if (!msg) return;
+      if (msg.type === 'file:chunk-ack') {
+        const ack = msg.payload as FileChunkAckPayload;
+        if (ack.transferId === transferId && ack.chunkIndex === chunkIndex) {
+          ws.removeListener('message', listener);
+          resolve();
+        }
+      } else if (msg.type === 'file:transfer-error') {
+        const e = msg.payload as { transferId: string; error: string };
+        if (e.transferId === transferId) { ws.removeListener('message', listener); reject(new Error(e.error)); }
+      }
+    };
+    ws.on('message', listener);
+  });
+}
+
+async function executePush(ws: WebSocket, agentName: string, localPath: string, remotePath: string): Promise<void> {
+  const sourcePath = path.resolve(localPath);
+  const stat = fs.statSync(sourcePath);
+  const isDirectory = stat.isDirectory();
+  const filename = path.basename(sourcePath);
+  const totalBytes = isDirectory ? 0 : stat.size;
+  const totalChunks = isDirectory ? 0 : Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
+  const transferId = randomUUID();
+
+  const response = await sendRequest(ws, 'push-file', {
+    agentName,
+    destPath: remotePath,
+    filename,
+    totalBytes,
+    isDirectory,
+    totalChunks,
+    transferId,
+  });
+  const resp = response.payload as { data: unknown; error?: string };
+  if (resp.error) throw new Error(resp.error);
+
+  ws.send(serializeMessage(createFileTransferStart({
+    transferId,
+    direction: 'push',
+    filename,
+    sourcePath,
+    destPath: remotePath,
+    totalBytes,
+    totalChunks,
+    isDirectory,
+    destAgent: agentName,
+  })));
+
+  // Wait for initial ack
+  await waitForFileAck(ws, transferId, -1);
+
+  if (isDirectory) {
+    const tar = spawn('tar', ['-c', '-C', sourcePath, '.']);
+    let buffer = Buffer.alloc(0);
+    let chunkIndex = 0;
+    await new Promise<void>((resolve, reject) => {
+      tar.stdout.on('data', async (chunk: Buffer) => {
+        tar.stdout.pause();
+        buffer = Buffer.concat([buffer, chunk]);
+        while (buffer.length >= CHUNK_SIZE) {
+          const slice = buffer.subarray(0, CHUNK_SIZE);
+          buffer = buffer.subarray(CHUNK_SIZE);
+          const idx = chunkIndex++;
+          ws.send(serializeMessage(createFileChunk({ transferId, chunkIndex: idx, data: slice.toString('base64') })));
+          await waitForFileAck(ws, transferId, idx);
+        }
+        tar.stdout.resume();
+      });
+      tar.stdout.on('end', async () => {
+        if (buffer.length > 0) {
+          const idx = chunkIndex++;
+          ws.send(serializeMessage(createFileChunk({ transferId, chunkIndex: idx, data: buffer.toString('base64') })));
+          await waitForFileAck(ws, transferId, idx);
+        }
+        ws.send(serializeMessage(createFileTransferComplete({ transferId })));
+        resolve();
+      });
+      tar.on('error', reject);
+    });
+  } else {
+    const fileStream = fs.createReadStream(sourcePath, { highWaterMark: CHUNK_SIZE });
+    let chunkIndex = 0;
+    for await (const chunk of fileStream) {
+      const idx = chunkIndex++;
+      ws.send(serializeMessage(createFileChunk({ transferId, chunkIndex: idx, data: (chunk as Buffer).toString('base64') })));
+      await waitForFileAck(ws, transferId, idx);
+    }
+    ws.send(serializeMessage(createFileTransferComplete({ transferId })));
+  }
+  console.log(`Upload complete: ${localPath} -> ${agentName}:${remotePath}`);
+}
+
+async function executePull(ws: WebSocket, agentName: string, remotePath: string, localPath: string): Promise<void> {
+  const transferId = randomUUID();
+  const destPath = path.resolve(localPath);
+
+  const response = await sendRequest(ws, 'pull-file', { agentName, sourcePath: remotePath, transferId });
+  const resp = response.payload as { data: unknown; error?: string };
+  if (resp.error) throw new Error(resp.error);
+
+  await new Promise<void>((resolve, reject) => {
+    let tarProcess: ReturnType<typeof spawn> | null = null;
+    let fileStream: fs.WriteStream | null = null;
+
+    ws.on('message', (raw) => {
+      const msg = parseMessage(raw.toString());
+      if (!msg) return;
+      if (msg.type === 'file:transfer-start') {
+        const p = msg.payload as FileTransferStartPayload;
+        if (p.transferId !== transferId) return;
+        if (p.isDirectory) {
+          fs.mkdirSync(destPath, { recursive: true });
+          tarProcess = spawn('tar', ['-x', '-C', destPath]);
+          tarProcess.on('close', (code) => { if (code !== 0) reject(new Error(`tar -x exited ${code}`)); });
+        } else {
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          fileStream = fs.createWriteStream(destPath);
+        }
+        ws.send(serializeMessage(createFileChunkAck({ transferId, chunkIndex: -1 })));
+      } else if (msg.type === 'file:chunk') {
+        const chunk = msg.payload as FileChunkPayload;
+        if (chunk.transferId !== transferId) return;
+        const data = Buffer.from(chunk.data, 'base64');
+        if (tarProcess) tarProcess.stdin?.write(data);
+        else if (fileStream) fileStream.write(data);
+        ws.send(serializeMessage(createFileChunkAck({ transferId, chunkIndex: chunk.chunkIndex })));
+      } else if (msg.type === 'file:transfer-complete') {
+        const p = msg.payload as FileTransferCompletePayload;
+        if (p.transferId !== transferId) return;
+        if (tarProcess) tarProcess.stdin?.end(() => resolve());
+        else if (fileStream) fileStream.end(() => resolve());
+        else resolve();
+      } else if (msg.type === 'file:transfer-error') {
+        const p = msg.payload as { transferId: string; error: string };
+        if (p.transferId === transferId) reject(new Error(p.error));
+      }
+    });
+  });
+  console.log(`Download complete: ${agentName}:${remotePath} -> ${destPath}`);
+}
+
+function parseTransferSpec(spec: string): { local: string; remote: string } {
+  const colonIdx = spec.lastIndexOf(':');
+  if (colonIdx === -1) throw new Error(`Invalid transfer spec "${spec}": expected <local>:<remote>`);
+  return { local: spec.slice(0, colonIdx), remote: spec.slice(colonIdx + 1) };
+}
 
 export const runCommand = new Command('run')
   .description('Dispatch a prompt to a remote agent')
@@ -14,7 +173,9 @@ export const runCommand = new Command('run')
   .option('--allowed-tools <tools>', 'Comma-separated tools to allow for this task')
   .option('--disallowed-tools <tools>', 'Comma-separated tools to deny for this task')
   .option('--add-dirs <dirs>', 'Comma-separated additional directories for this task')
-  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string }) => {
+  .option('--upload <spec>', 'Upload <local>:<remote> before task dispatch (repeatable)', (v, a: string[]) => { a.push(v); return a; }, [] as string[])
+  .option('--download <spec>', 'Download <remote>:<local> after task completes (repeatable)', (v, a: string[]) => { a.push(v); return a; }, [] as string[])
+  .action(async (prompt: string, options: { on: string; bg?: boolean; url?: string; session?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string; upload: string[]; download: string[] }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
 
@@ -23,6 +184,13 @@ export const runCommand = new Command('run')
     const addDirs = options.addDirs ? options.addDirs.split(',').map(s => s.trim()).filter(Boolean) : undefined;
 
     const ws = await connectCli(url, config.token);
+
+    // Execute uploads before dispatch
+    for (const spec of options.upload) {
+      const { local, remote } = parseTransferSpec(spec);
+      await executePush(ws, options.on, local, remote);
+    }
+
     const response = await sendRequest(ws, 'dispatch-task', {
       agentName: options.on,
       prompt,
@@ -49,18 +217,29 @@ export const runCommand = new Command('run')
     }
 
     // Stream output until task completes
-    ws.on('message', (raw) => {
-      const msg = parseMessage(raw.toString());
-      if (!msg) return;
+    await new Promise<void>((resolve) => {
+      ws.on('message', async (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (!msg) return;
 
-      if (msg.type === 'task:output' && msg.payload.taskId === taskId) {
-        process.stdout.write(msg.payload.data + '\n');
-      } else if (msg.type === 'task:complete' && msg.payload.taskId === taskId) {
-        ws.close();
-      } else if (msg.type === 'task:error' && msg.payload.taskId === taskId) {
-        console.error(`\nTask failed: ${msg.payload.error}`);
-        ws.close();
-        process.exit(1);
-      }
+        if (msg.type === 'task:output' && msg.payload.taskId === taskId) {
+          process.stdout.write(msg.payload.data + '\n');
+        } else if (msg.type === 'task:complete' && msg.payload.taskId === taskId) {
+          // Execute downloads after task completes
+          for (const spec of options.download) {
+            const { local: remote, remote: local } = parseTransferSpec(spec);
+            await executePull(ws, options.on, remote, local).catch((err) => {
+              console.error(`Download failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          }
+          resolve();
+        } else if (msg.type === 'task:error' && msg.payload.taskId === taskId) {
+          console.error(`\nTask failed: ${msg.payload.error}`);
+          ws.close();
+          process.exit(1);
+        }
+      });
     });
+
+    ws.close();
   });

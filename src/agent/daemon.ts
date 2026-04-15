@@ -2,9 +2,11 @@ import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
 import { createIsolationStrategy, WorktreeStrategy, type IsolationMode, type IsolationStrategy } from './isolation.js';
+import { FileSender, FileReceiver, isPathAllowed } from './file-handler.js';
 import { logger } from '../shared/logger.js';
 import { safeSend } from '../shared/ws-utils.js';
 import {
@@ -16,7 +18,15 @@ import {
   createTaskComplete,
   createTaskError,
   createSessionListResponse,
+  createFileTransferStart,
+  createFileChunkAck,
+  createFileTransferError,
   type SessionInfo,
+  type FileTransferStartPayload,
+  type FileChunkPayload,
+  type FileChunkAckPayload,
+  type FileTransferCompletePayload,
+  type FilePullRequestPayload,
 } from '../protocol/messages.js';
 
 const execFileAsync = promisify(execFile);
@@ -51,6 +61,8 @@ export class AgentDaemon {
   private lastHealth: { claudeAvailable: boolean; version?: string } = { claudeAvailable: false };
   private runningTaskCount = 0;
   private isolationStrategy: IsolationStrategy;
+  private fileSender = new FileSender();
+  private fileReceiver = new FileReceiver();
 
   constructor(options: AgentDaemonOptions) {
     this.options = options;
@@ -260,6 +272,35 @@ export class AgentDaemon {
               data: `[agent-message-reply] from=${fromAgent}: ${body}`,
             })));
           }
+        } else if (msg.type === 'file:pull-request') {
+          this.handleFilePullRequest(msg.payload as FilePullRequestPayload).catch((err) => {
+            logger.error({ error: err instanceof Error ? err.message : String(err) }, 'File pull-request failed');
+          });
+        } else if (msg.type === 'file:transfer-start') {
+          const payload = msg.payload as FileTransferStartPayload;
+          this.handleFileTransferStart(payload).catch((err) => {
+            logger.error({ transferId: payload.transferId, error: err instanceof Error ? err.message : String(err) }, 'File transfer-start failed');
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send(serializeMessage(createFileTransferError({
+                transferId: payload.transferId,
+                error: err instanceof Error ? err.message : String(err),
+              })));
+            }
+          });
+        } else if (msg.type === 'file:chunk') {
+          const payload = msg.payload as FileChunkPayload;
+          const ack = this.fileReceiver.handleChunk(payload);
+          if (ack && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(serializeMessage(createFileChunkAck(ack)));
+          }
+        } else if (msg.type === 'file:chunk-ack') {
+          this.fileSender.handleAck(msg.payload as FileChunkAckPayload);
+        } else if (msg.type === 'file:transfer-complete') {
+          const payload = msg.payload as FileTransferCompletePayload;
+          this.fileReceiver.handleComplete(payload);
+        } else if (msg.type === 'file:transfer-error') {
+          const { transferId, error } = msg.payload as { transferId: string; error: string };
+          this.fileReceiver.handleError(transferId, error);
         }
       });
 
@@ -328,6 +369,49 @@ export class AgentDaemon {
           error: err instanceof Error ? err.message : String(err),
         })));
       }
+    }
+  }
+
+  private async handleFilePullRequest(payload: FilePullRequestPayload): Promise<void> {
+    const { transferId, sourcePath } = payload;
+    const cwd = this.options.workingDirectory ?? process.cwd();
+    const addDirs = this.options.addDirs ?? [];
+
+    if (!isPathAllowed(sourcePath, cwd, addDirs)) {
+      logger.warn({ transferId, sourcePath }, 'File pull-request rejected: path not allowed');
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeMessage(createFileTransferError({
+          transferId,
+          error: `Path not allowed: ${sourcePath}`,
+        })));
+      }
+      return;
+    }
+
+    logger.info({ transferId, sourcePath }, 'Starting file send (pull-request)');
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    await this.fileSender.send(this.ws, transferId, sourcePath);
+  }
+
+  private async handleFileTransferStart(payload: FileTransferStartPayload): Promise<void> {
+    const { transferId, destPath } = payload;
+    const cwd = this.options.workingDirectory ?? process.cwd();
+    const addDirs = this.options.addDirs ?? [];
+
+    if (!isPathAllowed(destPath, cwd, addDirs)) {
+      logger.warn({ transferId, destPath }, 'File transfer-start rejected: dest path not allowed');
+      throw new Error(`Destination path not allowed: ${destPath}`);
+    }
+
+    logger.info({ transferId, destPath, isDirectory: payload.isDirectory }, 'Starting file receive');
+    // Start receiver (non-blocking — chunks will drive it)
+    this.fileReceiver.startReceive(transferId, destPath, payload).catch((err) => {
+      logger.error({ transferId, error: err instanceof Error ? err.message : String(err) }, 'File receive failed');
+    });
+
+    // Send initial ack to unblock the sender
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(serializeMessage(createFileChunkAck({ transferId, chunkIndex: -1 })));
     }
   }
 

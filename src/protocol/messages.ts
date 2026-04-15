@@ -112,6 +112,49 @@ export interface SessionListResponsePayload {
   error?: string;
 }
 
+// --- File transfer payload types ---
+
+export interface FileTransferStartPayload {
+  transferId: string;
+  direction: 'push' | 'pull' | 'transfer';
+  filename: string;
+  sourcePath: string;
+  destPath: string;
+  totalBytes: number;
+  totalChunks: number;
+  isDirectory: boolean;
+  sourceAgent?: string;
+  destAgent?: string;
+}
+
+export interface FileChunkPayload {
+  transferId: string;
+  chunkIndex: number;
+  data: string; // base64-encoded binary data
+}
+
+export interface FileChunkAckPayload {
+  transferId: string;
+  chunkIndex: number;
+}
+
+export interface FileTransferCompletePayload {
+  transferId: string;
+  checksum?: string; // optional SHA-256
+}
+
+export interface FileTransferErrorPayload {
+  transferId: string;
+  error: string;
+}
+
+export interface FilePullRequestPayload {
+  transferId: string;
+  sourcePath: string;
+  destAgent: string;
+  exclude?: string[];
+}
+
 // --- Concrete message types ---
 
 export type AgentRegister = Message<'agent:register', AgentRegisterPayload>;
@@ -128,6 +171,14 @@ export type AgentMessage = Message<'agent:message', AgentMessagePayload>;
 export type AgentMessageReply = Message<'agent:message-reply', AgentMessageReplyPayload>;
 export type AgentMessageAck = Message<'agent:message-ack', AgentMessageAckPayload>;
 
+// --- File transfer message types ---
+export type FileTransferStart = Message<'file:transfer-start', FileTransferStartPayload>;
+export type FileChunk = Message<'file:chunk', FileChunkPayload>;
+export type FileChunkAck = Message<'file:chunk-ack', FileChunkAckPayload>;
+export type FileTransferComplete = Message<'file:transfer-complete', FileTransferCompletePayload>;
+export type FileTransferError = Message<'file:transfer-error', FileTransferErrorPayload>;
+export type FilePullRequest = Message<'file:pull-request', FilePullRequestPayload>;
+
 export type AnyMessage =
   | AgentRegister
   | AgentHeartbeat
@@ -141,7 +192,13 @@ export type AnyMessage =
   | SessionListResponse
   | AgentMessage
   | AgentMessageReply
-  | AgentMessageAck;
+  | AgentMessageAck
+  | FileTransferStart
+  | FileChunk
+  | FileChunkAck
+  | FileTransferComplete
+  | FileTransferError
+  | FilePullRequest;
 
 // --- Factory functions ---
 
@@ -207,6 +264,32 @@ export function createAgentMessageAck(payload: AgentMessageAckPayload): AgentMes
   return makeMessage('agent:message-ack', payload);
 }
 
+// --- File transfer factory functions ---
+
+export function createFileTransferStart(payload: FileTransferStartPayload): FileTransferStart {
+  return makeMessage('file:transfer-start', payload);
+}
+
+export function createFileChunk(payload: FileChunkPayload): FileChunk {
+  return makeMessage('file:chunk', payload);
+}
+
+export function createFileChunkAck(payload: FileChunkAckPayload): FileChunkAck {
+  return makeMessage('file:chunk-ack', payload);
+}
+
+export function createFileTransferComplete(payload: FileTransferCompletePayload): FileTransferComplete {
+  return makeMessage('file:transfer-complete', payload);
+}
+
+export function createFileTransferError(payload: FileTransferErrorPayload): FileTransferError {
+  return makeMessage('file:transfer-error', payload);
+}
+
+export function createFilePullRequest(payload: FilePullRequestPayload): FilePullRequest {
+  return makeMessage('file:pull-request', payload);
+}
+
 // --- Serialization ---
 
 export function serializeMessage(msg: AnyMessage): string {
@@ -242,6 +325,8 @@ const VALID_TYPES = new Set([
   'cli:request', 'cli:response',
   'session:list-request', 'session:list-response',
   'agent:message', 'agent:message-reply', 'agent:message-ack',
+  'file:transfer-start', 'file:chunk', 'file:chunk-ack',
+  'file:transfer-complete', 'file:transfer-error', 'file:pull-request',
 ]);
 
 export function parseMessage(raw: string): AnyMessage | null {

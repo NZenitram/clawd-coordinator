@@ -9,6 +9,7 @@ import { logger } from '../shared/logger.js';
 import { metrics } from '../shared/metrics.js';
 import { TaskTracker, type TaskStore, type TaskStatus } from './tasks.js';
 import { InMemoryTaskQueue, type TaskQueue } from './queue.js';
+import { TransferManager } from './transfer.js';
 import { validateToken, validateAgentToken } from '../shared/auth.js';
 import { createRestHandler } from './rest.js';
 import { type UserStore, type UserRole } from './user-store.js';
@@ -23,8 +24,14 @@ import {
   createSessionListRequest,
   createAgentMessage,
   createAgentMessageAck,
+  createFilePullRequest,
+  createFileTransferStart,
+  createFileTransferError,
   MessageDeduplicator,
   type AnyMessage,
+  type FileTransferStartPayload,
+  type FileChunkPayload,
+  type FileChunkAckPayload,
 } from '../protocol/messages.js';
 import { safeSend } from '../shared/ws-utils.js';
 import { RateLimiter } from '../shared/rate-limiter.js';
@@ -92,6 +99,7 @@ export class Coordinator {
   private ipConnectionCounts = new Map<string, number>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private orgStates = new Map<string, OrgState>();
+  private transferManager = new TransferManager();
 
   // Backward-compat aliases pointing at the default org's state
   private get registry(): AgentRegistry { return this.getOrgState(DEFAULT_ORG_ID).registry; }
@@ -175,6 +183,7 @@ export class Coordinator {
         relayAgentMessage: (fromAgent, toAgent, correlationId, topic, body) => {
           return this.relayAgentMessageSync(fromAgent, toAgent, correlationId, topic, body);
         },
+        transferManager: this.transferManager,
       });
 
       if (this.options.tls) {
@@ -264,6 +273,7 @@ export class Coordinator {
   }
 
   async stop(): Promise<void> {
+    this.transferManager.stop();
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
@@ -537,6 +547,60 @@ export class Coordinator {
           logger.info({ from: msg.payload.fromAgent, to: toAgent, correlationId }, 'Agent message-reply relayed');
           break;
         }
+        case 'file:transfer-start': {
+          // Agent is starting a send (responding to pull-request or push from agent)
+          const payload = msg.payload as FileTransferStartPayload;
+          const rawMsg = raw.toString();
+          // Relay to the dest socket tracked in TransferManager
+          const relayed = this.transferManager.relayChunk(payload.transferId, rawMsg);
+          if (!relayed) {
+            // No active transfer — relay to all CLI sockets (pull response)
+            for (const cli of state.cliSockets) {
+              if (cli.readyState === WebSocket.OPEN) safeSend(cli, rawMsg);
+            }
+          }
+          break;
+        }
+        case 'file:chunk': {
+          const payload = msg.payload as FileChunkPayload;
+          const rawMsg = raw.toString();
+          this.transferManager.relayChunkMsg(payload.transferId, rawMsg, payload);
+          break;
+        }
+        case 'file:chunk-ack': {
+          const payload = msg.payload as FileChunkAckPayload;
+          const rawMsg = raw.toString();
+          // Agent acks go back to source (could be CLI or another agent)
+          const relayed = this.transferManager.relayAckMsg(payload.transferId, rawMsg, payload);
+          if (!relayed) {
+            // No active transfer entry — relay to all CLI sockets
+            for (const cli of state.cliSockets) {
+              if (cli.readyState === WebSocket.OPEN) safeSend(cli, rawMsg);
+            }
+          }
+          break;
+        }
+        case 'file:transfer-complete': {
+          const { transferId } = msg.payload as { transferId: string };
+          const rawMsg = raw.toString();
+          // Relay to dest, then complete
+          this.transferManager.relayChunk(transferId, rawMsg); // reuse relay to dest
+          this.transferManager.completeTransfer(transferId);
+          // Also broadcast to CLI sockets
+          for (const cli of state.cliSockets) {
+            if (cli.readyState === WebSocket.OPEN) safeSend(cli, rawMsg);
+          }
+          break;
+        }
+        case 'file:transfer-error': {
+          const { transferId } = msg.payload as { transferId: string };
+          const rawMsg = raw.toString();
+          this.transferManager.errorTransfer(transferId, (msg.payload as { transferId: string; error: string }).error);
+          for (const cli of state.cliSockets) {
+            if (cli.readyState === WebSocket.OPEN) safeSend(cli, rawMsg);
+          }
+          break;
+        }
       }
     });
 
@@ -575,6 +639,35 @@ export class Coordinator {
       if (msg.type === 'cli:request') {
         const user = (ws as any).__user as { userId: string | null; role: UserRole; orgId?: string };
         this.handleCliRequest(ws, msg.id, msg.payload, user, orgId);
+      } else if (msg.type === 'file:transfer-start') {
+        // CLI is pushing a file — relay to dest agent via TransferManager
+        const payload = msg.payload as FileTransferStartPayload;
+        const rawMsg = raw.toString();
+        const relayed = this.transferManager.relayChunk(payload.transferId, rawMsg);
+        if (!relayed) {
+          // Relay to all agent sockets (coordinator doesn't know dest yet — agents filter by transferId)
+          const destAgentName = payload.destAgent;
+          if (destAgentName) {
+            const agentWs = state.agentSockets.get(destAgentName);
+            if (agentWs && agentWs.readyState === WebSocket.OPEN) safeSend(agentWs, rawMsg);
+          }
+        }
+      } else if (msg.type === 'file:chunk') {
+        const payload = msg.payload as FileChunkPayload;
+        const rawMsg = raw.toString();
+        this.transferManager.relayChunkMsg(payload.transferId, rawMsg, payload);
+      } else if (msg.type === 'file:chunk-ack') {
+        const payload = msg.payload as FileChunkAckPayload;
+        const rawMsg = raw.toString();
+        this.transferManager.relayAckMsg(payload.transferId, rawMsg, payload);
+      } else if (msg.type === 'file:transfer-complete') {
+        const { transferId } = msg.payload as { transferId: string };
+        const rawMsg = raw.toString();
+        this.transferManager.relayChunk(transferId, rawMsg);
+        this.transferManager.completeTransfer(transferId);
+      } else if (msg.type === 'file:transfer-error') {
+        const { transferId, error } = msg.payload as { transferId: string; error: string };
+        this.transferManager.errorTransfer(transferId, error);
       }
     });
 
@@ -948,6 +1041,161 @@ export class Coordinator {
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { correlationId, status: result.status },
+        })));
+        break;
+      }
+      case 'push-file': {
+        // CLI is pushing a file to an agent.
+        // Args: agentName, destPath, filename, totalBytes, isDirectory, transferId?, exclude?
+        const agentName = this.requireStringArg(args, 'agentName');
+        const destPath = this.requireStringArg(args, 'destPath');
+        const filename = this.requireStringArg(args, 'filename');
+        if (!agentName || !destPath || !filename) {
+          this.sendError(ws, requestId, 'Missing required arguments: agentName, destPath, filename');
+          return;
+        }
+        const agentWs = state.agentSockets.get(agentName);
+        if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Agent "${agentName}" not found or not reachable`);
+          return;
+        }
+        const transferId = typeof args?.transferId === 'string' ? args.transferId : randomUUID();
+        const totalBytes = typeof args?.totalBytes === 'number' ? args.totalBytes : 0;
+        const isDirectory = args?.isDirectory === true;
+        const totalChunks = typeof args?.totalChunks === 'number' ? args.totalChunks : 0;
+
+        // Register transfer: CLI is source, agent is dest
+        const startPayload: FileTransferStartPayload = {
+          transferId,
+          direction: 'push',
+          filename,
+          sourcePath: '',
+          destPath,
+          totalBytes,
+          totalChunks,
+          isDirectory,
+          destAgent: agentName,
+        };
+        this.transferManager.startTransfer(transferId, startPayload, ws, agentWs);
+
+        // Forward transfer-start to agent
+        agentWs.send(serializeMessage(createFileTransferStart(startPayload)));
+
+        ws.send(serializeMessage(createCliResponse({
+          requestId,
+          data: { transferId, ready: true },
+        })));
+        break;
+      }
+      case 'pull-file': {
+        // CLI wants to pull a file from an agent.
+        // Args: agentName, sourcePath, transferId?, exclude?
+        const agentName = this.requireStringArg(args, 'agentName');
+        const sourcePath = this.requireStringArg(args, 'sourcePath');
+        if (!agentName || !sourcePath) {
+          this.sendError(ws, requestId, 'Missing required arguments: agentName, sourcePath');
+          return;
+        }
+        const agentWs = state.agentSockets.get(agentName);
+        if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Agent "${agentName}" not found or not reachable`);
+          return;
+        }
+        const transferId = typeof args?.transferId === 'string' ? args.transferId : randomUUID();
+        const exclude = Array.isArray(args?.exclude) ? (args.exclude as unknown[]).filter((e): e is string => typeof e === 'string') : [];
+
+        // Register transfer: agent is source, CLI is dest
+        const pullMetadata: FileTransferStartPayload = {
+          transferId,
+          direction: 'pull',
+          filename: sourcePath.split('/').pop() ?? sourcePath,
+          sourcePath,
+          destPath: '',
+          totalBytes: 0,
+          totalChunks: 0,
+          isDirectory: false,
+          sourceAgent: agentName,
+        };
+        this.transferManager.startTransfer(transferId, pullMetadata, agentWs, ws);
+
+        // Tell agent to start sending
+        agentWs.send(serializeMessage(createFilePullRequest({
+          transferId,
+          sourcePath,
+          destAgent: agentName,
+          exclude,
+        })));
+
+        ws.send(serializeMessage(createCliResponse({
+          requestId,
+          data: { transferId, ready: true },
+        })));
+        break;
+      }
+      case 'transfer-file': {
+        // Agent-to-agent transfer.
+        // Args: fromAgent, toAgent, sourcePath, destPath, transferId?, exclude?
+        const fromAgent = this.requireStringArg(args, 'fromAgent');
+        const toAgent = this.requireStringArg(args, 'toAgent');
+        const sourcePath = this.requireStringArg(args, 'sourcePath');
+        const destPath = this.requireStringArg(args, 'destPath');
+        if (!fromAgent || !toAgent || !sourcePath || !destPath) {
+          this.sendError(ws, requestId, 'Missing required arguments: fromAgent, toAgent, sourcePath, destPath');
+          return;
+        }
+        const fromWs = state.agentSockets.get(fromAgent);
+        const toWs = state.agentSockets.get(toAgent);
+        if (!fromWs || fromWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Source agent "${fromAgent}" not found or not reachable`);
+          return;
+        }
+        if (!toWs || toWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Destination agent "${toAgent}" not found or not reachable`);
+          return;
+        }
+        const transferId = typeof args?.transferId === 'string' ? args.transferId : randomUUID();
+        const exclude = Array.isArray(args?.exclude) ? (args.exclude as unknown[]).filter((e): e is string => typeof e === 'string') : [];
+
+        // Register transfer: fromAgent is source, toAgent is dest
+        const transferMetadata: FileTransferStartPayload = {
+          transferId,
+          direction: 'transfer',
+          filename: sourcePath.split('/').pop() ?? sourcePath,
+          sourcePath,
+          destPath,
+          totalBytes: 0,
+          totalChunks: 0,
+          isDirectory: false,
+          sourceAgent: fromAgent,
+          destAgent: toAgent,
+        };
+        this.transferManager.startTransfer(transferId, transferMetadata, fromWs, toWs);
+
+        // Tell dest agent to prepare to receive
+        toWs.send(serializeMessage(createFileTransferStart({
+          ...transferMetadata,
+          direction: 'transfer',
+        })));
+
+        // Tell source agent to start sending
+        fromWs.send(serializeMessage(createFilePullRequest({
+          transferId,
+          sourcePath,
+          destAgent: toAgent,
+          exclude,
+        })));
+
+        ws.send(serializeMessage(createCliResponse({
+          requestId,
+          data: { transferId, status: 'initiated' },
+        })));
+        break;
+      }
+      case 'list-transfers': {
+        const transfers = this.transferManager.getActiveTransfers();
+        ws.send(serializeMessage(createCliResponse({
+          requestId,
+          data: { transfers },
         })));
         break;
       }

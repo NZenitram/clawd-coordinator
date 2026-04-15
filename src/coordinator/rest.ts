@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { TaskStore, TaskStatus } from './tasks.js';
 import type { AgentRegistry } from './registry.js';
 import type { TaskQueue } from './queue.js';
+import type { TransferManager } from './transfer.js';
 import { validateToken } from '../shared/auth.js';
 import { metrics } from '../shared/metrics.js';
 import { type UserStore, type UserRole } from './user-store.js';
@@ -107,8 +108,9 @@ export function createRestHandler(options: {
   getOrgRegistry?: (orgId: string) => AgentRegistry;
   getOrgQueue?: (orgId: string) => TaskQueue | undefined;
   relayAgentMessage?: (fromAgent: string, toAgent: string, correlationId: string, topic: string, body: string) => AgentMessageRelayResult;
+  transferManager?: TransferManager;
 }): (req: IncomingMessage, res: ServerResponse) => void {
-  const { store, registry, token, queue, userStore, getOrgRegistry, getOrgQueue, relayAgentMessage } = options;
+  const { store, registry, token, queue, userStore, getOrgRegistry, getOrgQueue, relayAgentMessage, transferManager } = options;
 
   return async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -455,6 +457,89 @@ export function createRestHandler(options: {
       const correlationId = randomUUID();
       const result = relayAgentMessage(fromAgent, toAgent, correlationId, topic, msgBody);
       sendJson(res, 200, { correlationId, status: result.status });
+      return;
+    }
+
+    // GET /api/transfers — list active file transfers
+    if (method === 'GET' && pathname === '/api/transfers') {
+      if (!transferManager) {
+        sendJson(res, 501, { error: 'Transfer manager not available' });
+        return;
+      }
+      const transfers = transferManager.getActiveTransfers();
+      sendJson(res, 200, { transfers });
+      return;
+    }
+
+    // POST /api/push — initiate a push transfer
+    if (method === 'POST' && pathname === '/api/push') {
+      if (!transferManager) {
+        sendJson(res, 501, { error: 'Transfer manager not available' });
+        return;
+      }
+      let body: unknown;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { error: 'Request body must be a JSON object' });
+        return;
+      }
+      const payload = body as Record<string, unknown>;
+      const agentName = typeof payload['agentName'] === 'string' ? payload['agentName'] : null;
+      const destPath = typeof payload['destPath'] === 'string' ? payload['destPath'] : null;
+      const filename = typeof payload['filename'] === 'string' ? payload['filename'] : null;
+      if (!agentName || !destPath || !filename) {
+        sendJson(res, 400, { error: 'Missing required fields: agentName, destPath, filename' });
+        return;
+      }
+      const agent = activeRegistry.get(agentName);
+      if (!agent) {
+        sendJson(res, 404, { error: `Agent "${agentName}" not found` });
+        return;
+      }
+      const transferId = randomUUID();
+      // Return transferId — client will stream chunks over WebSocket
+      sendJson(res, 202, { transferId });
+      return;
+    }
+
+    // POST /api/pull — initiate a pull transfer
+    if (method === 'POST' && pathname === '/api/pull') {
+      if (!transferManager) {
+        sendJson(res, 501, { error: 'Transfer manager not available' });
+        return;
+      }
+      let body: unknown;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { error: 'Request body must be a JSON object' });
+        return;
+      }
+      const payload = body as Record<string, unknown>;
+      const agentName = typeof payload['agentName'] === 'string' ? payload['agentName'] : null;
+      const sourcePath = typeof payload['sourcePath'] === 'string' ? payload['sourcePath'] : null;
+      if (!agentName || !sourcePath) {
+        sendJson(res, 400, { error: 'Missing required fields: agentName, sourcePath' });
+        return;
+      }
+      const agent = activeRegistry.get(agentName);
+      if (!agent) {
+        sendJson(res, 404, { error: `Agent "${agentName}" not found` });
+        return;
+      }
+      const transferId = randomUUID();
+      sendJson(res, 202, { transferId });
       return;
     }
 

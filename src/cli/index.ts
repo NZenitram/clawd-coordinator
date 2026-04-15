@@ -14,6 +14,9 @@ import { dashboardCommand } from './commands/dashboard.js';
 import { usersCommand } from './commands/users.js';
 import { orgsCommand } from './commands/orgs.js';
 import { sendMessageCommand } from './commands/send-message.js';
+import { pushCommand } from './commands/push.js';
+import { pullCommand } from './commands/pull.js';
+import { transferCommand } from './commands/transfer.js';
 
 const program = new Command();
 
@@ -38,5 +41,8 @@ program.addCommand(dashboardCommand);
 program.addCommand(usersCommand);
 program.addCommand(orgsCommand);
 program.addCommand(sendMessageCommand);
+program.addCommand(pushCommand);
+program.addCommand(pullCommand);
+program.addCommand(transferCommand);
 
 program.parse();

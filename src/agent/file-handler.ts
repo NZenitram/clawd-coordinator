@@ -1,0 +1,340 @@
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import WebSocket from 'ws';
+import { logger } from '../shared/logger.js';
+import { safeSend } from '../shared/ws-utils.js';
+import {
+  serializeMessage,
+  createFileTransferStart,
+  createFileChunk,
+  createFileChunkAck,
+  createFileTransferComplete,
+  createFileTransferError,
+  type FileTransferStartPayload,
+  type FileChunkPayload,
+  type FileChunkAckPayload,
+  type FileTransferCompletePayload,
+} from '../protocol/messages.js';
+
+export const CHUNK_SIZE = 512 * 1024; // 512KB raw → ~682KB base64
+
+/** Returns true iff targetPath is inside cwd or one of addDirs. */
+export function isPathAllowed(targetPath: string, cwd: string, addDirs: string[]): boolean {
+  const resolved = path.resolve(targetPath);
+  const allowed = [cwd, ...addDirs];
+  return allowed.some((dir) => {
+    const resolvedDir = path.resolve(dir);
+    return resolved === resolvedDir || resolved.startsWith(resolvedDir + path.sep);
+  });
+}
+
+// ─── FileSender ────────────────────────────────────────────────────────────────
+
+export interface FileSenderOptions {
+  exclude?: string[];
+  chunkSize?: number;
+}
+
+/**
+ * Sends a file or directory over WebSocket in base64-encoded chunks.
+ * Waits for file:chunk-ack after each chunk for backpressure.
+ */
+export class FileSender {
+  private pendingAcks = new Map<string, (ack: FileChunkAckPayload) => void>();
+
+  /** Call this when a file:chunk-ack arrives to unblock the sender. */
+  handleAck(ack: FileChunkAckPayload): void {
+    const resolve = this.pendingAcks.get(ack.transferId + ':' + ack.chunkIndex);
+    if (resolve) {
+      this.pendingAcks.delete(ack.transferId + ':' + ack.chunkIndex);
+      resolve(ack);
+    }
+  }
+
+  private waitForAck(transferId: string, chunkIndex: number): Promise<FileChunkAckPayload> {
+    return new Promise((resolve) => {
+      this.pendingAcks.set(transferId + ':' + chunkIndex, resolve);
+    });
+  }
+
+  async send(
+    ws: WebSocket,
+    transferId: string,
+    sourcePath: string,
+    options: FileSenderOptions = {},
+  ): Promise<void> {
+    const chunkSize = options.chunkSize ?? CHUNK_SIZE;
+    const stat = await fsPromises.stat(sourcePath);
+    const isDirectory = stat.isDirectory();
+
+    if (isDirectory) {
+      await this.sendDirectory(ws, transferId, sourcePath, options.exclude ?? [], chunkSize);
+    } else {
+      await this.sendFile(ws, transferId, sourcePath, stat.size, chunkSize);
+    }
+  }
+
+  private async sendFile(
+    ws: WebSocket,
+    transferId: string,
+    filePath: string,
+    totalBytes: number,
+    chunkSize: number,
+  ): Promise<void> {
+    const filename = path.basename(filePath);
+    const totalChunks = Math.max(1, Math.ceil(totalBytes / chunkSize));
+
+    // Send file:transfer-start
+    const startPayload: FileTransferStartPayload = {
+      transferId,
+      direction: 'pull',
+      filename,
+      sourcePath: filePath,
+      destPath: '',
+      totalBytes,
+      totalChunks,
+      isDirectory: false,
+    };
+    safeSend(ws, serializeMessage(createFileTransferStart(startPayload)));
+
+    // Stream chunks
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs.createReadStream(filePath, { highWaterMark: chunkSize });
+      let chunkIndex = 0;
+      const hash = createHash('sha256');
+      let paused = false;
+
+      stream.on('data', async (chunk: string | Buffer) => {
+        stream.pause();
+        paused = true;
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+        try {
+          hash.update(buf);
+          const data = buf.toString('base64');
+          const currentIndex = chunkIndex++;
+          safeSend(ws, serializeMessage(createFileChunk({ transferId, chunkIndex: currentIndex, data })));
+          await this.waitForAck(transferId, currentIndex);
+          stream.resume();
+          paused = false;
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      stream.on('end', async () => {
+        if (paused) return; // handled by data handler
+        const checksum = hash.digest('hex');
+        safeSend(ws, serializeMessage(createFileTransferComplete({ transferId, checksum })));
+        resolve();
+      });
+
+      stream.on('error', reject);
+    });
+
+    const finalHash = createHash('sha256');
+    // Already sent complete above; this path handles the hash finishing inline
+  }
+
+  private async sendDirectory(
+    ws: WebSocket,
+    transferId: string,
+    dirPath: string,
+    exclude: string[],
+    chunkSize: number,
+  ): Promise<void> {
+    const filename = path.basename(dirPath);
+    const baseDir = dirPath;
+
+    // We don't know tar output size ahead of time — send 0 as placeholder
+    const startPayload: FileTransferStartPayload = {
+      transferId,
+      direction: 'pull',
+      filename,
+      sourcePath: dirPath,
+      destPath: '',
+      totalBytes: 0,
+      totalChunks: 0,
+      isDirectory: true,
+    };
+    safeSend(ws, serializeMessage(createFileTransferStart(startPayload)));
+
+    const excludeFlags: string[] = [];
+    for (const pattern of exclude) {
+      excludeFlags.push(`--exclude=${pattern}`);
+    }
+
+    const tarArgs = ['-c', ...excludeFlags, '-C', baseDir, '.'];
+    const tar = spawn('tar', tarArgs);
+
+    let chunkIndex = 0;
+    const hash = createHash('sha256');
+
+    await new Promise<void>((resolve, reject) => {
+      let buffer = Buffer.alloc(0);
+
+      tar.stdout.on('data', async (chunk: Buffer) => {
+        tar.stdout.pause();
+        hash.update(chunk);
+        buffer = Buffer.concat([buffer, chunk]);
+
+        while (buffer.length >= chunkSize) {
+          const slice = buffer.subarray(0, chunkSize);
+          buffer = buffer.subarray(chunkSize);
+          const data = slice.toString('base64');
+          const currentIndex = chunkIndex++;
+          safeSend(ws, serializeMessage(createFileChunk({ transferId, chunkIndex: currentIndex, data })));
+          await this.waitForAck(transferId, currentIndex);
+        }
+
+        tar.stdout.resume();
+      });
+
+      tar.stdout.on('end', async () => {
+        // Flush remaining bytes
+        if (buffer.length > 0) {
+          const data = buffer.toString('base64');
+          const currentIndex = chunkIndex++;
+          safeSend(ws, serializeMessage(createFileChunk({ transferId, chunkIndex: currentIndex, data })));
+          await this.waitForAck(transferId, currentIndex);
+        }
+        const checksum = hash.digest('hex');
+        safeSend(ws, serializeMessage(createFileTransferComplete({ transferId, checksum })));
+        resolve();
+      });
+
+      tar.stderr.on('data', (d: Buffer) => {
+        logger.warn({ transferId, stderr: d.toString() }, 'tar stderr');
+      });
+
+      tar.on('error', reject);
+      tar.on('close', (code) => {
+        if (code !== 0) reject(new Error(`tar exited with code ${code}`));
+      });
+    });
+  }
+}
+
+// ─── FileReceiver ──────────────────────────────────────────────────────────────
+
+interface ReceiverSession {
+  metadata: FileTransferStartPayload;
+  destPath: string;
+  tarProcess?: ReturnType<typeof spawn>;
+  fileStream?: fs.WriteStream;
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
+/**
+ * Receives a chunked file or directory transfer.
+ * Caller must wire incoming file:chunk and file:transfer-complete messages here.
+ */
+export class FileReceiver {
+  private sessions = new Map<string, ReceiverSession>();
+
+  /**
+   * Begins receiving a transfer. Returns a promise that resolves when the
+   * transfer completes (i.e., after file:transfer-complete is processed).
+   *
+   * Caller is responsible for sending file:chunk-ack replies.
+   */
+  startReceive(
+    transferId: string,
+    destPath: string,
+    metadata: FileTransferStartPayload,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (metadata.isDirectory) {
+        // Ensure destination directory exists
+        fs.mkdirSync(destPath, { recursive: true });
+        const tar = spawn('tar', ['-x', '-C', destPath]);
+        const session: ReceiverSession = { metadata, destPath, tarProcess: tar, resolve, reject };
+        this.sessions.set(transferId, session);
+
+        tar.stderr.on('data', (d: Buffer) => {
+          logger.warn({ transferId, stderr: d.toString() }, 'tar (receive) stderr');
+        });
+        tar.on('error', reject);
+        tar.on('close', (code) => {
+          if (code !== 0) reject(new Error(`tar -x exited with code ${code}`));
+          // resolve() is called by handleComplete
+        });
+      } else {
+        // Ensure parent directory exists
+        const parentDir = path.dirname(destPath);
+        fs.mkdirSync(parentDir, { recursive: true });
+        const fileStream = fs.createWriteStream(destPath);
+        const session: ReceiverSession = { metadata, destPath, fileStream, resolve, reject };
+        this.sessions.set(transferId, session);
+
+        fileStream.on('error', reject);
+      }
+    });
+  }
+
+  /**
+   * Handles an incoming file:chunk.
+   * Returns the ack payload so the caller can send it back.
+   */
+  handleChunk(chunk: FileChunkPayload): FileChunkAckPayload | null {
+    const session = this.sessions.get(chunk.transferId);
+    if (!session) return null;
+
+    const raw = Buffer.from(chunk.data, 'base64');
+
+    if (session.tarProcess) {
+      session.tarProcess.stdin?.write(raw);
+    } else if (session.fileStream) {
+      session.fileStream.write(raw);
+    }
+
+    return { transferId: chunk.transferId, chunkIndex: chunk.chunkIndex };
+  }
+
+  /**
+   * Finalizes the transfer. Closes streams and resolves the promise from startReceive.
+   */
+  handleComplete(complete: FileTransferCompletePayload): void {
+    const session = this.sessions.get(complete.transferId);
+    if (!session) return;
+    this.sessions.delete(complete.transferId);
+
+    if (session.tarProcess) {
+      session.tarProcess.stdin?.end(() => {
+        // resolve happens in tar 'close' event — but only if exit code is 0
+        // We hook resolve here so we don't double-resolve
+        session.tarProcess!.on('close', (code) => {
+          if (code === 0) session.resolve();
+        });
+      });
+    } else if (session.fileStream) {
+      session.fileStream.end(() => {
+        session.resolve();
+      });
+    } else {
+      session.resolve();
+    }
+  }
+
+  /** Abort an active receive session. */
+  handleError(transferId: string, error: string): void {
+    const session = this.sessions.get(transferId);
+    if (!session) return;
+    this.sessions.delete(transferId);
+
+    if (session.tarProcess) {
+      session.tarProcess.kill();
+    }
+    if (session.fileStream) {
+      session.fileStream.destroy();
+    }
+    session.reject(new Error(error));
+  }
+
+  hasSession(transferId: string): boolean {
+    return this.sessions.has(transferId);
+  }
+}

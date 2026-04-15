@@ -12,7 +12,9 @@ export const fanOutCommand = new Command('fan-out')
   .option('--allowed-tools <tools>', 'Comma-separated tools to allow for this task')
   .option('--disallowed-tools <tools>', 'Comma-separated tools to deny for this task')
   .option('--add-dirs <dirs>', 'Comma-separated additional directories for this task')
-  .action(async (prompt: string, options: { on: string; url?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string }) => {
+  .option('--upload <spec>', 'Upload <local>:<remote> to each agent before dispatch (repeatable)', (v, a: string[]) => { a.push(v); return a; }, [] as string[])
+  .option('--download <spec>', 'Download <remote>:<local> from each agent after task completes (repeatable)', (v, a: string[]) => { a.push(v); return a; }, [] as string[])
+  .action(async (prompt: string, options: { on: string; url?: string; budget?: string; allowedTools?: string; disallowedTools?: string; addDirs?: string; upload: string[]; download: string[] }) => {
     const config = requireConfig();
     const url = options.url ?? config.coordinatorUrl ?? `ws://localhost:${config.port ?? 8080}`;
     const agentNames = options.on.split(',').map(s => s.trim());

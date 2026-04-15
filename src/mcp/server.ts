@@ -213,6 +213,79 @@ export class CoordMcpServer {
       },
     );
 
+    // push_files
+    this.mcp.registerTool(
+      'push_files',
+      {
+        description: 'Push a local file or directory to a remote agent',
+        inputSchema: z.object({
+          agentName: z.string().describe('Target agent name'),
+          sourcePath: z.string().describe('Local file or directory path to push'),
+          destPath: z.string().describe('Destination path on the agent'),
+          exclude: z.array(z.string()).optional().describe('Glob patterns to exclude (for directories)'),
+        }),
+      },
+      async (args) => {
+        const ws = await this.ensureConnected();
+        const response = await sendRequest(ws, 'push-file', {
+          agentName: args.agentName,
+          destPath: args.destPath,
+          filename: args.sourcePath.split('/').pop() ?? args.sourcePath,
+          totalBytes: 0,
+          isDirectory: false,
+          totalChunks: 0,
+        });
+
+        const payload = response.payload as { data: unknown; error?: string };
+        if (payload.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${payload.error}` }],
+            isError: true,
+          };
+        }
+
+        const data = asRecord(payload.data);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ transferId: data['transferId'], ready: data['ready'] }) }],
+        };
+      },
+    );
+
+    // pull_files
+    this.mcp.registerTool(
+      'pull_files',
+      {
+        description: 'Pull a file or directory from a remote agent to local',
+        inputSchema: z.object({
+          agentName: z.string().describe('Source agent name'),
+          sourcePath: z.string().describe('Remote file or directory path'),
+          destPath: z.string().describe('Local destination path'),
+          exclude: z.array(z.string()).optional().describe('Glob patterns to exclude (for directories)'),
+        }),
+      },
+      async (args) => {
+        const ws = await this.ensureConnected();
+        const response = await sendRequest(ws, 'pull-file', {
+          agentName: args.agentName,
+          sourcePath: args.sourcePath,
+          exclude: args.exclude ?? [],
+        });
+
+        const payload = response.payload as { data: unknown; error?: string };
+        if (payload.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${payload.error}` }],
+            isError: true,
+          };
+        }
+
+        const data = asRecord(payload.data);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ transferId: data['transferId'], ready: data['ready'] }) }],
+        };
+      },
+    );
+
     // send_agent_message
     this.mcp.registerTool(
       'send_agent_message',
