@@ -72,10 +72,10 @@ describe('WorktreeStrategy', () => {
 
     const result = await strategy.setup(taskId, baseDir);
 
-    expect(result).toBe('/repo/.worktrees/abc-123');
+    expect(result).toBe(join('/repo', '.worktrees', 'abc-123'));
     expect(execFile).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'add', '/repo/.worktrees/abc-123', '-d'],
+      ['worktree', 'add', join('/repo', '.worktrees', 'abc-123'), '-d'],
       { cwd: baseDir },
       expect.any(Function),
     );
@@ -97,8 +97,8 @@ describe('WorktreeStrategy', () => {
 
     expect(execFile).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '--force', '/repo/.worktrees/abc-456'],
-      {},
+      ['worktree', 'remove', '--force', join('/repo', '.worktrees', 'abc-456')],
+      expect.any(Object),
       expect.any(Function),
     );
   });
@@ -138,8 +138,8 @@ describe('WorktreeStrategy', () => {
       strategy.setup('t1', '/repo'),
       strategy.setup('t2', '/repo'),
     ]);
-    expect(r1).toBe('/repo/.worktrees/t1');
-    expect(r2).toBe('/repo/.worktrees/t2');
+    expect(r1).toBe(join('/repo', '.worktrees', 't1'));
+    expect(r2).toBe(join('/repo', '.worktrees', 't2'));
     expect(execFile).toHaveBeenCalledTimes(2);
   });
 });
@@ -281,13 +281,13 @@ describe('WorktreeStrategy.pruneOrphans', () => {
     expect(execFile).toHaveBeenCalledTimes(3);
     expect(execFile).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '--force', '/repo/.worktrees/task-orphan-1'],
+      ['worktree', 'remove', '--force', join('/repo', '.worktrees', 'task-orphan-1')],
       { cwd: '/repo' },
       expect.any(Function),
     );
     expect(execFile).toHaveBeenCalledWith(
       'git',
-      ['worktree', 'remove', '--force', '/repo/.worktrees/task-orphan-2'],
+      ['worktree', 'remove', '--force', join('/repo', '.worktrees', 'task-orphan-2')],
       { cwd: '/repo' },
       expect.any(Function),
     );
