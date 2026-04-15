@@ -1,8 +1,9 @@
 import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
 import { createIsolationStrategy, WorktreeStrategy, type IsolationMode, type IsolationStrategy } from './isolation.js';
@@ -18,6 +19,7 @@ import {
   createTaskComplete,
   createTaskError,
   createSessionListResponse,
+  createAgentSelfUpdateResponse,
   createFileTransferStart,
   createFileChunkAck,
   createFileTransferError,
@@ -302,6 +304,11 @@ export class AgentDaemon {
         } else if (msg.type === 'file:transfer-error') {
           const { transferId, error } = msg.payload as { transferId: string; error: string };
           this.fileReceiver.handleError(transferId, error);
+        } else if (msg.type === 'agent:self-update') {
+          const { requestId } = msg.payload;
+          this.handleSelfUpdate(requestId).catch((err) => {
+            logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Self-update handler error');
+          });
         }
       });
 
@@ -413,6 +420,88 @@ export class AgentDaemon {
     // Send initial ack to unblock the sender
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(serializeMessage(createFileChunkAck({ transferId, chunkIndex: -1 })));
+    }
+  }
+
+  private async handleSelfUpdate(requestId: string): Promise<void> {
+    // Resolve the package root from the running script location:
+    // process.argv[1] is something like /path/to/clawd-coordinator/dist/cli/index.js
+    // Two levels up from dist/cli/index.js gives the project root.
+    const packageDir = path.resolve(path.dirname(process.argv[1]), '..', '..');
+
+    const sendResponse = (payload: Parameters<typeof createAgentSelfUpdateResponse>[0]): void => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeMessage(createAgentSelfUpdateResponse(payload)));
+      }
+    };
+
+    let oldVersion = '';
+    let newVersion = '';
+
+    try {
+      // Get current version before update
+      try {
+        const { stdout } = await execFileAsync(process.execPath, [
+          path.join(packageDir, 'dist', 'cli', 'index.js'), '--version',
+        ], { cwd: packageDir, timeout: 10000 });
+        oldVersion = stdout.trim();
+      } catch {
+        // Non-fatal — version detection failure should not block the update
+        oldVersion = 'unknown';
+      }
+
+      // git pull
+      logger.info({ packageDir }, 'Self-update: git pull');
+      await execFileAsync('git', ['pull'], { cwd: packageDir, timeout: 30000 });
+
+      // npm install
+      logger.info({ packageDir }, 'Self-update: npm install');
+      await execFileAsync('npm', ['install'], { cwd: packageDir, timeout: 120000 });
+
+      // npm run build
+      logger.info({ packageDir }, 'Self-update: npm run build');
+      await execFileAsync('npm', ['run', 'build'], { cwd: packageDir, timeout: 60000 });
+
+      // Get new version after build
+      try {
+        const { stdout } = await execFileAsync(process.execPath, [
+          path.join(packageDir, 'dist', 'cli', 'index.js'), '--version',
+        ], { cwd: packageDir, timeout: 10000 });
+        newVersion = stdout.trim();
+      } catch {
+        newVersion = 'unknown';
+      }
+
+      sendResponse({
+        requestId,
+        success: true,
+        message: 'Update complete. Restarting...',
+        oldVersion,
+        newVersion,
+      });
+
+      logger.info({ oldVersion, newVersion }, 'Self-update complete — scheduling restart');
+
+      // Re-exec with same args after a short delay so the response can be delivered
+      setTimeout(() => {
+        const child = spawn(process.execPath, process.argv.slice(1), {
+          detached: true,
+          stdio: 'ignore',
+          cwd: process.cwd(),
+          env: process.env,
+        });
+        child.unref();
+        process.exit(0);
+      }, 1000);
+
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ error: message }, 'Self-update failed');
+      sendResponse({
+        requestId,
+        success: false,
+        message,
+      });
     }
   }
 

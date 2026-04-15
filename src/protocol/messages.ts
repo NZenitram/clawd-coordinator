@@ -155,6 +155,20 @@ export interface FilePullRequestPayload {
   exclude?: string[];
 }
 
+// --- Self-update payload types ---
+
+export interface AgentSelfUpdatePayload {
+  requestId: string;
+}
+
+export interface AgentSelfUpdateResponsePayload {
+  requestId: string;
+  success: boolean;
+  message: string;
+  oldVersion?: string;
+  newVersion?: string;
+}
+
 // --- Concrete message types ---
 
 export type AgentRegister = Message<'agent:register', AgentRegisterPayload>;
@@ -178,6 +192,8 @@ export type FileChunkAck = Message<'file:chunk-ack', FileChunkAckPayload>;
 export type FileTransferComplete = Message<'file:transfer-complete', FileTransferCompletePayload>;
 export type FileTransferError = Message<'file:transfer-error', FileTransferErrorPayload>;
 export type FilePullRequest = Message<'file:pull-request', FilePullRequestPayload>;
+export type AgentSelfUpdate = Message<'agent:self-update', AgentSelfUpdatePayload>;
+export type AgentSelfUpdateResponse = Message<'agent:self-update-response', AgentSelfUpdateResponsePayload>;
 
 export type AnyMessage =
   | AgentRegister
@@ -198,7 +214,9 @@ export type AnyMessage =
   | FileChunkAck
   | FileTransferComplete
   | FileTransferError
-  | FilePullRequest;
+  | FilePullRequest
+  | AgentSelfUpdate
+  | AgentSelfUpdateResponse;
 
 // --- Factory functions ---
 
@@ -290,6 +308,14 @@ export function createFilePullRequest(payload: FilePullRequestPayload): FilePull
   return makeMessage('file:pull-request', payload);
 }
 
+export function createAgentSelfUpdate(payload: AgentSelfUpdatePayload): AgentSelfUpdate {
+  return makeMessage('agent:self-update', payload);
+}
+
+export function createAgentSelfUpdateResponse(payload: AgentSelfUpdateResponsePayload): AgentSelfUpdateResponse {
+  return makeMessage('agent:self-update-response', payload);
+}
+
 // --- Serialization ---
 
 export function serializeMessage(msg: AnyMessage): string {
@@ -327,6 +353,7 @@ const VALID_TYPES = new Set([
   'agent:message', 'agent:message-reply', 'agent:message-ack',
   'file:transfer-start', 'file:chunk', 'file:chunk-ack',
   'file:transfer-complete', 'file:transfer-error', 'file:pull-request',
+  'agent:self-update', 'agent:self-update-response',
 ]);
 
 export function parseMessage(raw: string): AnyMessage | null {

@@ -24,6 +24,7 @@ import {
   createSessionListRequest,
   createAgentMessage,
   createAgentMessageAck,
+  createAgentSelfUpdate,
   createFilePullRequest,
   createFileTransferStart,
   createFileTransferError,
@@ -32,6 +33,7 @@ import {
   type FileTransferStartPayload,
   type FileChunkPayload,
   type FileChunkAckPayload,
+  type AgentSelfUpdateResponsePayload,
 } from '../protocol/messages.js';
 import { safeSend } from '../shared/ws-utils.js';
 import { RateLimiter } from '../shared/rate-limiter.js';
@@ -82,6 +84,7 @@ interface OrgState {
   registry: AgentRegistry;
   queue: TaskQueue;
   sessionListPending: Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>;
+  selfUpdatePending: Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>;
 }
 
 export class Coordinator {
@@ -111,6 +114,9 @@ export class Coordinator {
   private get sessionListPending(): Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }> {
     return this.getOrgState(DEFAULT_ORG_ID).sessionListPending;
   }
+  private get selfUpdatePending(): Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }> {
+    return this.getOrgState(DEFAULT_ORG_ID).selfUpdatePending;
+  }
 
   private getOrgState(orgId: string): OrgState {
     let state = this.orgStates.get(orgId);
@@ -123,6 +129,7 @@ export class Coordinator {
         registry: new AgentRegistry(),
         queue: new InMemoryTaskQueue(),
         sessionListPending: new Map(),
+        selfUpdatePending: new Map(),
       };
       this.orgStates.set(orgId, state);
     }
@@ -503,6 +510,28 @@ export class Coordinator {
           }
           break;
         }
+        case 'agent:self-update-response': {
+          const suPayload = msg.payload as AgentSelfUpdateResponsePayload;
+          const { requestId } = suPayload;
+          const pending = state.selfUpdatePending.get(requestId);
+          if (!pending) break;
+          clearTimeout(pending.timer);
+          state.selfUpdatePending.delete(requestId);
+          const { cliSocket, cliRequestId } = pending;
+          if (cliSocket.readyState === WebSocket.OPEN) {
+            cliSocket.send(serializeMessage(createCliResponse({
+              requestId: cliRequestId,
+              data: {
+                success: suPayload.success,
+                message: suPayload.message,
+                oldVersion: suPayload.oldVersion,
+                newVersion: suPayload.newVersion,
+              },
+              error: suPayload.success ? undefined : suPayload.message,
+            })));
+          }
+          break;
+        }
         case 'agent:message': {
           // Enforce sender identity
           if (agentName) msg.payload.fromAgent = agentName;
@@ -692,6 +721,12 @@ export class Coordinator {
         if (pending.cliSocket === ws) {
           clearTimeout(pending.timer);
           state.sessionListPending.delete(reqId);
+        }
+      }
+      for (const [reqId, pending] of state.selfUpdatePending) {
+        if (pending.cliSocket === ws) {
+          clearTimeout(pending.timer);
+          state.selfUpdatePending.delete(reqId);
         }
       }
     });
@@ -1201,6 +1236,28 @@ export class Coordinator {
           requestId,
           data: { transfers },
         })));
+        break;
+      }
+      case 'self-update': {
+        const agentName = this.requireStringArg(args, 'agentName');
+        if (!agentName) {
+          this.sendError(ws, requestId, 'Missing required argument: agentName');
+          return;
+        }
+        const agentWs = state.agentSockets.get(agentName);
+        if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
+          this.sendError(ws, requestId, `Agent "${agentName}" is not reachable`);
+          return;
+        }
+        const timer = setTimeout(() => {
+          const pending = state.selfUpdatePending.get(requestId);
+          if (pending) {
+            state.selfUpdatePending.delete(requestId);
+            this.sendError(pending.cliSocket, pending.cliRequestId, 'Self-update request timed out');
+          }
+        }, 30000);
+        state.selfUpdatePending.set(requestId, { cliSocket: ws, cliRequestId: requestId, timer });
+        agentWs.send(serializeMessage(createAgentSelfUpdate({ requestId })));
         break;
       }
       default: {

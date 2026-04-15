@@ -19,6 +19,7 @@ import { pullCommand } from './commands/pull.js';
 import { transferCommand } from './commands/transfer.js';
 import { describeCommand } from './commands/describe.js';
 import { claudeMdCommand } from './commands/claude-md.js';
+import { selfUpdateCommand } from './commands/self-update.js';
 
 const program = new Command();
 
@@ -48,5 +49,6 @@ program.addCommand(pullCommand);
 program.addCommand(transferCommand);
 program.addCommand(describeCommand);
 program.addCommand(claudeMdCommand);
+program.addCommand(selfUpdateCommand);
 
 program.parse();

@@ -600,4 +600,131 @@ describe('Coordinator', () => {
 
     agentA.close();
   });
+
+  // --- self-update tests ---
+
+  it('self-update relays agent:self-update to agent and routes response back to CLI', async () => {
+    const { createAgentSelfUpdateResponse } = await import('../../src/protocol/messages.js');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agent = await connectWs('/agent');
+    agent.send(serializeMessage(createAgentRegister({ name: 'update-target', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    // Capture what the agent receives
+    const agentMsgPromise = new Promise<ReturnType<typeof parseMessage>>((resolve) => {
+      agent.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg?.type === 'agent:self-update') resolve(msg);
+      });
+    });
+
+    const cli = await connectWs('/cli');
+
+    // CLI sends self-update request
+    const cliResponsePromise = waitForMessage(cli);
+    cli.send(serializeMessage(createCliRequest({ command: 'self-update', args: { agentName: 'update-target' } })));
+
+    // Agent receives the self-update message
+    const agentMsg = await agentMsgPromise;
+    expect(agentMsg).not.toBeNull();
+    expect(agentMsg!.type).toBe('agent:self-update');
+    const requestId = (agentMsg!.payload as { requestId: string }).requestId;
+
+    // Agent sends back success response
+    agent.send(serializeMessage(createAgentSelfUpdateResponse({
+      requestId,
+      success: true,
+      message: 'Update complete. Restarting...',
+      oldVersion: '0.1.0',
+      newVersion: '0.2.0',
+    })));
+
+    const cliResponse = parseMessage(await cliResponsePromise);
+    expect(cliResponse).not.toBeNull();
+    expect(cliResponse!.type).toBe('cli:response');
+    const data = (cliResponse!.payload as { data: { success: boolean; oldVersion: string; newVersion: string } }).data;
+    expect(data.success).toBe(true);
+    expect(data.oldVersion).toBe('0.1.0');
+    expect(data.newVersion).toBe('0.2.0');
+
+    agent.close();
+    cli.close();
+  });
+
+  it('self-update returns error when agent is not registered', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const cli = await connectWs('/cli');
+    const cliResponsePromise = waitForMessage(cli);
+    cli.send(serializeMessage(createCliRequest({ command: 'self-update', args: { agentName: 'ghost-agent' } })));
+
+    const cliResponse = parseMessage(await cliResponsePromise);
+    expect(cliResponse).not.toBeNull();
+    expect(cliResponse!.type).toBe('cli:response');
+    const payload = cliResponse!.payload as { error?: string };
+    expect(payload.error).toMatch(/not reachable/);
+
+    cli.close();
+  });
+
+  it('self-update returns error when agentName is missing', async () => {
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const cli = await connectWs('/cli');
+    const cliResponsePromise = waitForMessage(cli);
+    cli.send(serializeMessage(createCliRequest({ command: 'self-update', args: {} })));
+
+    const cliResponse = parseMessage(await cliResponsePromise);
+    expect(cliResponse).not.toBeNull();
+    const payload = cliResponse!.payload as { error?: string };
+    expect(payload.error).toMatch(/agentName/);
+
+    cli.close();
+  });
+
+  it('self-update routes failure response back to CLI when agent reports failure', async () => {
+    const { createAgentSelfUpdateResponse } = await import('../../src/protocol/messages.js');
+
+    coordinator = new Coordinator({ port: TEST_PORT, token: TEST_TOKEN });
+    await coordinator.start();
+
+    const agent = await connectWs('/agent');
+    agent.send(serializeMessage(createAgentRegister({ name: 'update-fail-agent', os: 'linux', arch: 'x64' })));
+    await new Promise(r => setTimeout(r, 50));
+
+    const agentMsgPromise = new Promise<ReturnType<typeof parseMessage>>((resolve) => {
+      agent.on('message', (raw) => {
+        const msg = parseMessage(raw.toString());
+        if (msg?.type === 'agent:self-update') resolve(msg);
+      });
+    });
+
+    const cli = await connectWs('/cli');
+    const cliResponsePromise = waitForMessage(cli);
+    cli.send(serializeMessage(createCliRequest({ command: 'self-update', args: { agentName: 'update-fail-agent' } })));
+
+    const agentMsg = await agentMsgPromise;
+    const requestId = (agentMsg!.payload as { requestId: string }).requestId;
+
+    // Agent reports failure
+    agent.send(serializeMessage(createAgentSelfUpdateResponse({
+      requestId,
+      success: false,
+      message: 'git pull failed: merge conflict',
+    })));
+
+    const cliResponse = parseMessage(await cliResponsePromise);
+    expect(cliResponse).not.toBeNull();
+    const payload = cliResponse!.payload as { error?: string; data: { success: boolean; message: string } };
+    expect(payload.error).toBe('git pull failed: merge conflict');
+    expect(payload.data.success).toBe(false);
+
+    agent.close();
+    cli.close();
+  });
 });
