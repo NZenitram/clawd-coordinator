@@ -504,6 +504,8 @@ export class Coordinator {
           break;
         }
         case 'agent:message': {
+          // Enforce sender identity
+          if (agentName) msg.payload.fromAgent = agentName;
           const { toAgent, correlationId } = msg.payload;
           const targetSocket = state.agentSockets.get(toAgent);
           if (!targetSocket) {
@@ -526,6 +528,8 @@ export class Coordinator {
           break;
         }
         case 'agent:message-reply': {
+          // Enforce sender identity
+          if (agentName) msg.payload.fromAgent = agentName;
           const { toAgent, correlationId } = msg.payload;
           const targetSocket = state.agentSockets.get(toAgent);
           if (!targetSocket) {
@@ -768,19 +772,19 @@ export class Coordinator {
     toAgent: string,
     correlationId: string,
     topic: string,
-    body: string
+    body: string,
+    orgId?: string
   ): { status: 'delivered' | 'agent-offline' | 'unknown-agent' } {
-    // Search all org states for the target agent
-    for (const state of this.orgStates.values()) {
-      const targetSocket = state.agentSockets.get(toAgent);
-      if (targetSocket) {
-        if (targetSocket.readyState !== WebSocket.OPEN) return { status: 'agent-offline' };
-        targetSocket.send(serializeMessage(createAgentMessage({ fromAgent, toAgent, correlationId, topic, body })));
-        logger.info({ from: fromAgent, to: toAgent, correlationId }, 'Agent message relayed via REST');
-        return { status: 'delivered' };
-      }
-    }
-    return { status: 'unknown-agent' };
+    // Scope to specific org if provided, otherwise search default org only
+    const searchOrgId = orgId ?? DEFAULT_ORG_ID;
+    const state = this.orgStates.get(searchOrgId);
+    if (!state) return { status: 'unknown-agent' };
+    const targetSocket = state.agentSockets.get(toAgent);
+    if (!targetSocket) return { status: 'unknown-agent' };
+    if (targetSocket.readyState !== WebSocket.OPEN) return { status: 'agent-offline' };
+    targetSocket.send(serializeMessage(createAgentMessage({ fromAgent, toAgent, correlationId, topic, body })));
+    logger.info({ from: fromAgent, to: toAgent, correlationId, orgId: searchOrgId }, 'Agent message relayed');
+    return { status: 'delivered' };
   }
 
   private processQueueForOrg(agentName: string, state: OrgState): void {

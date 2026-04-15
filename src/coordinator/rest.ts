@@ -302,6 +302,11 @@ export function createRestHandler(options: {
       const payload = body as Record<string, unknown>;
       const userId = typeof payload['userId'] === 'string' ? payload['userId'] : null;
       const memberRole = typeof payload['role'] === 'string' ? payload['role'] : 'operator';
+      const VALID_ROLES = new Set(['admin', 'operator', 'viewer']);
+      if (!VALID_ROLES.has(memberRole)) {
+        sendJson(res, 400, { error: `Invalid role: ${memberRole}. Valid: admin, operator, viewer` });
+        return;
+      }
       if (!userId) {
         sendJson(res, 400, { error: 'Missing required field: userId' });
         return;

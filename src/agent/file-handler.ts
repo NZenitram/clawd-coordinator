@@ -163,7 +163,11 @@ export class FileSender {
 
     const excludeFlags: string[] = [];
     for (const pattern of exclude) {
-      excludeFlags.push(`--exclude=${pattern}`);
+      // Sanitize: reject patterns that could be interpreted as tar flags
+      const sanitized = pattern.replace(/[^\w.*?/\-[\]{}]/g, '');
+      if (sanitized && !sanitized.startsWith('-')) {
+        excludeFlags.push(`--exclude=${sanitized}`);
+      }
     }
 
     const tarArgs = ['-c', ...excludeFlags, '-C', baseDir, '.'];
@@ -219,11 +223,15 @@ export class FileSender {
 
 // ─── FileReceiver ──────────────────────────────────────────────────────────────
 
+const MAX_TRANSFER_BYTES = 2 * 1024 * 1024 * 1024; // 2GB default limit
+
 interface ReceiverSession {
   metadata: FileTransferStartPayload;
   destPath: string;
   tarProcess?: ReturnType<typeof spawn>;
   fileStream?: fs.WriteStream;
+  bytesReceived: number;
+  maxBytes: number;
   resolve: () => void;
   reject: (err: Error) => void;
 }
@@ -247,11 +255,15 @@ export class FileReceiver {
     metadata: FileTransferStartPayload,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      if (metadata.totalBytes > MAX_TRANSFER_BYTES) {
+        reject(new Error(`Transfer exceeds maximum size (${metadata.totalBytes} > ${MAX_TRANSFER_BYTES})`));
+        return;
+      }
       if (metadata.isDirectory) {
         // Ensure destination directory exists
         fs.mkdirSync(destPath, { recursive: true });
         const tar = spawn('tar', ['-x', '-C', destPath]);
-        const session: ReceiverSession = { metadata, destPath, tarProcess: tar, resolve, reject };
+        const session: ReceiverSession = { metadata, destPath, tarProcess: tar, bytesReceived: 0, maxBytes: MAX_TRANSFER_BYTES, resolve, reject };
         this.sessions.set(transferId, session);
 
         tar.stderr.on('data', (d: Buffer) => {
@@ -267,7 +279,7 @@ export class FileReceiver {
         const parentDir = path.dirname(destPath);
         fs.mkdirSync(parentDir, { recursive: true });
         const fileStream = fs.createWriteStream(destPath);
-        const session: ReceiverSession = { metadata, destPath, fileStream, resolve, reject };
+        const session: ReceiverSession = { metadata, destPath, fileStream, bytesReceived: 0, maxBytes: MAX_TRANSFER_BYTES, resolve, reject };
         this.sessions.set(transferId, session);
 
         fileStream.on('error', reject);
@@ -284,6 +296,12 @@ export class FileReceiver {
     if (!session) return null;
 
     const raw = Buffer.from(chunk.data, 'base64');
+    session.bytesReceived += raw.length;
+    if (session.bytesReceived > session.maxBytes) {
+      session.reject(new Error(`Transfer exceeded maximum size (${session.maxBytes} bytes)`));
+      this.sessions.delete(chunk.transferId);
+      return null;
+    }
 
     if (session.tarProcess) {
       session.tarProcess.stdin?.write(raw);
