@@ -136,13 +136,11 @@ All 7 phases of the V2 expansion plan are complete:
 
 ## Future Backlog
 
-- TUI/dashboard for visual session monitoring
-- Hosted relay service for multi-user/team use
-- Retry/dead letter handling for failed tasks
-- Ephemeral machine provisioning
-- User management (multi-user auth, permissions, RBAC)
-- Cross-session communication between remote instances
-- Distributed tracing and observability
+- Ephemeral machine provisioning (auto-provision cloud VMs for tasks)
+- server.ts decomposition (1,207 lines — extract CommandRouter, TransferRelay, ConnectionManager)
+- Typed WebSocket wrapper (replace `(ws as any).__user` property bags)
+- File transfer checksum verification on receive
+- Pull command WebSocket cleanup (hangs after completion)
 
 ## Documentation
 
