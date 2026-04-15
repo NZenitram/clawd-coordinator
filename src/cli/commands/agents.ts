@@ -23,13 +23,14 @@ export const agentsCommand = new Command('agents')
     const rows = agents.map(a => [
       a.name,
       a.status,
+      a.coordVersion ?? '-',
       `${a.os}/${a.arch}`,
       formatDuration(now - a.connectedAt),
       a.currentTaskIds?.length > 0 ? a.currentTaskIds.map((id: string) => id.slice(0, 8)).join(', ') : '-',
     ]);
 
     console.log(formatTable(
-      ['NAME', 'STATUS', 'PLATFORM', 'UPTIME', 'CURRENT TASKS'],
+      ['NAME', 'STATUS', 'VERSION', 'PLATFORM', 'UPTIME', 'CURRENT TASKS'],
       rows
     ));
   });

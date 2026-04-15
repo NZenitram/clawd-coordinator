@@ -7,6 +7,7 @@ export interface AgentInfo {
   name: string;
   os: string;
   arch: string;
+  coordVersion?: string;
   status: 'idle' | 'active' | 'busy' | 'offline';
   currentTaskIds: string[];
   maxConcurrent: number;
@@ -21,7 +22,7 @@ export interface AgentInfo {
 export class AgentRegistry {
   private agents = new Map<string, AgentInfo>();
 
-  register(name: string, meta: { os: string; arch: string; maxConcurrent?: number; allowedTools?: string[]; addDirs?: string[]; permissionMode?: string }): void {
+  register(name: string, meta: { os: string; arch: string; coordVersion?: string; maxConcurrent?: number; allowedTools?: string[]; addDirs?: string[]; permissionMode?: string }): void {
     if (this.agents.has(name)) {
       throw new Error(`Agent "${name}" is already registered`);
     }
@@ -30,6 +31,7 @@ export class AgentRegistry {
       name,
       os: meta.os,
       arch: meta.arch,
+      coordVersion: meta.coordVersion,
       status: 'idle',
       currentTaskIds: [],
       maxConcurrent: meta.maxConcurrent ?? 1,

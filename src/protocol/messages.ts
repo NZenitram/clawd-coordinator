@@ -21,6 +21,7 @@ export interface AgentRegisterPayload {
   name: string;
   os: string;
   arch: string;
+  coordVersion?: string;
   maxConcurrent?: number;
   health?: AgentHealthPayload;
   allowedTools?: string[];

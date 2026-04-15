@@ -411,9 +411,11 @@ export class Coordinator {
             ? (msg.payload.addDirs as unknown[]).filter((d): d is string => typeof d === 'string')
             : undefined;
           const regPermissionMode = typeof msg.payload.permissionMode === 'string' ? msg.payload.permissionMode : undefined;
+          const coordVersion = typeof msg.payload.coordVersion === 'string' ? msg.payload.coordVersion : undefined;
           state.registry.register(requestedName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
+            coordVersion,
             maxConcurrent,
             allowedTools: regAllowedTools,
             addDirs: regAddDirs,

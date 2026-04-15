@@ -3,6 +3,7 @@ import { platform, arch } from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { Executor } from './executor.js';
 import { checkClaudeHealth } from './health.js';
@@ -128,10 +129,19 @@ export class AgentDaemon {
         logger.info({ coordinator: this.options.coordinatorUrl, name: this.options.name }, 'Agent connected');
         this.reconnectDelay = this.options.reconnectDelayMs ?? 1000;
 
+        // Read package version for drift detection
+        let coordVersion = 'unknown';
+        try {
+          const packageDir = path.resolve(path.dirname(process.argv[1]), '..', '..');
+          const pkg = JSON.parse(readFileSync(path.join(packageDir, 'package.json'), 'utf-8'));
+          coordVersion = pkg.version ?? 'unknown';
+        } catch { /* non-fatal */ }
+
         this.ws!.send(serializeMessage(createAgentRegister({
           name: this.options.name,
           os: platform(),
           arch: arch(),
+          coordVersion,
           maxConcurrent: this.options.maxConcurrent,
           health: this.lastHealth,
           allowedTools: this.options.allowedTools,
