@@ -138,6 +138,7 @@ Local Machine                          Remote Machines
 | `coord orgs create` | Create a new organization | `--name`, `--url` |
 | `coord orgs add-member` | Add a user to an organization | `--org-id`, `--user-id`, `--role`, `--url` |
 | `coord orgs remove-member` | Remove a user from an organization | `--org-id`, `--user-id`, `--url` |
+| `coord send-message` | Send a message between agents | `--from`, `--to`, `--topic`, `--body`, `--url` |
 
 ### Common Patterns
 
@@ -400,6 +401,11 @@ coord run "unstable operation" --on my-agent
 ## Cross-Session Agent Communication
 
 Agents can communicate with each other directly via topic-based messaging. This enables distributed workflows like data aggregation, result fanout, and inter-agent coordination.
+
+**Via CLI:**
+```bash
+coord send-message --from agent-a --to agent-b --topic "api-contract" --body "What endpoints do you expose?"
+```
 
 **Via REST API:**
 ```bash

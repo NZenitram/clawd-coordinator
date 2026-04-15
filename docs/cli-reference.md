@@ -26,6 +26,7 @@ Complete reference for all `coord` CLI commands and options.
 | `coord orgs create` | Create a new organization (admin only) |
 | `coord orgs add-member` | Add a member to an org (org admin only) |
 | `coord orgs remove-member` | Remove a member from an org (org admin only) |
+| `coord send-message` | Send a message from one agent to another |
 
 ---
 
@@ -734,6 +735,39 @@ Configuration is stored at `~/.coord/config.json`:
   }
 }
 ```
+
+---
+
+### coord send-message
+
+Send a message from one agent to another via the coordinator relay.
+
+**Usage:**
+```
+coord send-message --from <agent> --to <agent> --topic <topic> --body <body> [options]
+```
+
+**Options:**
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--from <agent>` | Yes | — | Source agent name |
+| `--to <agent>` | Yes | — | Target agent name |
+| `--topic <topic>` | Yes | — | Message topic |
+| `--body <body>` | Yes | — | Message body (string or JSON) |
+| `--url <url>` | No | from config | Coordinator URL |
+
+**Examples:**
+```bash
+# Send a simple message
+coord send-message --from agent-a --to agent-b --topic "api-contract" --body "What endpoints do you expose?"
+
+# Send JSON data
+coord send-message --from frontend --to backend --topic "data-sync" --body '{"items": [1, 2, 3]}'
+```
+
+Output: `Message sent (correlationId: abc-123, status: delivered)`
+
+Possible statuses: `delivered`, `agent-offline`, `unknown-agent`
 
 ---
 
