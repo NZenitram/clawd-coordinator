@@ -19,6 +19,17 @@ export interface ApiKeyInfo {
   revokedAt: number | null;
 }
 
+export interface Org {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+export interface OrgMembership {
+  orgId: string;
+  role: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -34,6 +45,19 @@ CREATE TABLE IF NOT EXISTS api_keys (
   label TEXT,
   created_at INTEGER NOT NULL,
   revoked_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS orgs (
+  id TEXT PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS org_members (
+  org_id TEXT NOT NULL REFERENCES orgs(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL DEFAULT 'operator',
+  PRIMARY KEY (org_id, user_id)
 );
 `;
 
@@ -168,9 +192,104 @@ export class UserStore {
     return results;
   }
 
+  // ── Orgs ─────────────────────────────────────────────────────────────────────
+
+  createOrg(name: string): Org {
+    const id = randomUUID();
+    const now = Date.now();
+    this.db.run(
+      'INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)',
+      [id, name, now]
+    );
+    this.save();
+    return { id, name, createdAt: now };
+  }
+
+  getOrg(id: string): Org | null {
+    const stmt = this.db.prepare('SELECT * FROM orgs WHERE id = ?');
+    stmt.bind([id]);
+    if (!stmt.step()) { stmt.free(); return null; }
+    const row = stmt.getAsObject();
+    stmt.free();
+    return this.rowToOrg(row);
+  }
+
+  getOrgByName(name: string): Org | null {
+    const stmt = this.db.prepare('SELECT * FROM orgs WHERE name = ?');
+    stmt.bind([name]);
+    if (!stmt.step()) { stmt.free(); return null; }
+    const row = stmt.getAsObject();
+    stmt.free();
+    return this.rowToOrg(row);
+  }
+
+  listOrgs(): Org[] {
+    const stmt = this.db.prepare('SELECT * FROM orgs ORDER BY created_at ASC');
+    const results: Org[] = [];
+    while (stmt.step()) {
+      results.push(this.rowToOrg(stmt.getAsObject()));
+    }
+    stmt.free();
+    return results;
+  }
+
+  addOrgMember(orgId: string, userId: string, role: string): void {
+    this.db.run(
+      'INSERT OR REPLACE INTO org_members (org_id, user_id, role) VALUES (?, ?, ?)',
+      [orgId, userId, role]
+    );
+    this.save();
+  }
+
+  removeOrgMember(orgId: string, userId: string): void {
+    this.db.run('DELETE FROM org_members WHERE org_id = ? AND user_id = ?', [orgId, userId]);
+    this.save();
+  }
+
+  getOrgMembership(userId: string): OrgMembership[] {
+    const stmt = this.db.prepare('SELECT org_id, role FROM org_members WHERE user_id = ? ORDER BY org_id ASC');
+    stmt.bind([userId]);
+    const results: OrgMembership[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      results.push({ orgId: row.org_id as string, role: row.role as string });
+    }
+    stmt.free();
+    return results;
+  }
+
+  getUserOrg(userId: string, orgId: string): OrgMembership | null {
+    const stmt = this.db.prepare('SELECT org_id, role FROM org_members WHERE user_id = ? AND org_id = ?');
+    stmt.bind([userId, orgId]);
+    if (!stmt.step()) { stmt.free(); return null; }
+    const row = stmt.getAsObject();
+    stmt.free();
+    return { orgId: row.org_id as string, role: row.role as string };
+  }
+
+  listOrgMembers(orgId: string): Array<{ userId: string; role: string }> {
+    const stmt = this.db.prepare('SELECT user_id, role FROM org_members WHERE org_id = ? ORDER BY user_id ASC');
+    stmt.bind([orgId]);
+    const results: Array<{ userId: string; role: string }> = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      results.push({ userId: row.user_id as string, role: row.role as string });
+    }
+    stmt.free();
+    return results;
+  }
+
   close(): void {
     this.save();
     this.db.close();
+  }
+
+  private rowToOrg(row: Record<string, unknown>): Org {
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      createdAt: row.created_at as number,
+    };
   }
 
   private rowToUser(row: Record<string, unknown>): User {

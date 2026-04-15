@@ -12,6 +12,7 @@ import { sessionsCommand, resumeCommand } from './commands/sessions.js';
 import { mcpCommand } from './commands/mcp.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { usersCommand } from './commands/users.js';
+import { orgsCommand } from './commands/orgs.js';
 
 const program = new Command();
 
@@ -34,5 +35,6 @@ program.addCommand(resumeCommand);
 program.addCommand(mcpCommand);
 program.addCommand(dashboardCommand);
 program.addCommand(usersCommand);
+program.addCommand(orgsCommand);
 
 program.parse();

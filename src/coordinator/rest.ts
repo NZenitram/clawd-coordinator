@@ -7,6 +7,8 @@ import { validateToken } from '../shared/auth.js';
 import { metrics } from '../shared/metrics.js';
 import { type UserStore, type UserRole } from './user-store.js';
 
+export const DEFAULT_ORG_ID = '__default__';
+
 const VALID_STATUSES = new Set<TaskStatus>(['pending', 'running', 'completed', 'error', 'dead-letter']);
 
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
@@ -76,6 +78,22 @@ function resolveRole(req: IncomingMessage, token: string, userStore?: UserStore)
   return 'viewer';
 }
 
+function resolveUser(req: IncomingMessage, token: string, userStore?: UserStore): { userId: string | null; role: UserRole; orgId: string } {
+  const provided = getProvidedToken(req);
+  if (validateToken(provided, token)) {
+    return { userId: null, role: 'admin', orgId: DEFAULT_ORG_ID };
+  }
+  if (userStore) {
+    const resolved = userStore.resolveApiKey(provided);
+    if (resolved) {
+      const memberships = userStore.getOrgMembership(resolved.userId);
+      const orgId = memberships.length > 0 ? memberships[0].orgId : DEFAULT_ORG_ID;
+      return { userId: resolved.userId, role: resolved.role as UserRole, orgId };
+    }
+  }
+  return { userId: null, role: 'viewer', orgId: DEFAULT_ORG_ID };
+}
+
 export interface AgentMessageRelayResult {
   status: 'delivered' | 'agent-offline' | 'unknown-agent';
 }
@@ -86,9 +104,11 @@ export function createRestHandler(options: {
   token: string;
   queue?: TaskQueue;
   userStore?: UserStore;
+  getOrgRegistry?: (orgId: string) => AgentRegistry;
+  getOrgQueue?: (orgId: string) => TaskQueue | undefined;
   relayAgentMessage?: (fromAgent: string, toAgent: string, correlationId: string, topic: string, body: string) => AgentMessageRelayResult;
 }): (req: IncomingMessage, res: ServerResponse) => void {
-  const { store, registry, token, queue, userStore, relayAgentMessage } = options;
+  const { store, registry, token, queue, userStore, getOrgRegistry, getOrgQueue, relayAgentMessage } = options;
 
   return async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
@@ -107,12 +127,17 @@ export function createRestHandler(options: {
       }
     }
 
-    // Resolve caller's role (used for admin-only endpoints)
+    // Resolve caller's role and org context
     const callerRole = resolveRole(req, token, userStore);
+    const caller = resolveUser(req, token, userStore);
+    const callerOrgId = caller.orgId;
+    // Use org-scoped registry/queue if available, otherwise fall back to defaults
+    const activeRegistry = getOrgRegistry ? getOrgRegistry(callerOrgId) : registry;
+    const activeQueue = getOrgQueue ? getOrgQueue(callerOrgId) : queue;
 
     // GET /api/agents
     if (method === 'GET' && pathname === '/api/agents') {
-      const agents = registry.list();
+      const agents = activeRegistry.list();
       sendJson(res, 200, { agents });
       return;
     }
@@ -129,12 +154,12 @@ export function createRestHandler(options: {
           });
           return;
         }
-        const tasks = store.list(statusParam as TaskStatus);
+        const tasks = store.list(statusParam as TaskStatus, callerOrgId);
         sendJson(res, 200, { tasks });
         return;
       }
 
-      const tasks = store.list();
+      const tasks = store.list(undefined, callerOrgId);
       sendJson(res, 200, { tasks });
       return;
     }
@@ -175,21 +200,130 @@ export function createRestHandler(options: {
 
       const sessionId = typeof payload['sessionId'] === 'string' ? payload['sessionId'] : undefined;
 
-      const agent = registry.get(agentName);
+      const agent = activeRegistry.get(agentName);
       if (!agent) {
         sendJson(res, 404, { error: `Agent "${agentName}" not found` });
         return;
       }
 
       const traceId = randomUUID();
-      const task = store.create({ agentName, prompt, sessionId, traceId });
+      const task = store.create({ agentName, prompt, sessionId, traceId, orgId: callerOrgId });
 
-      if (queue) {
-        queue.enqueue(task.id, agentName);
+      if (activeQueue) {
+        activeQueue.enqueue(task.id, agentName);
         sendJson(res, 202, { taskId: task.id, status: 'queued' });
       } else {
         sendJson(res, 202, { taskId: task.id, status: task.status });
       }
+      return;
+    }
+
+    // ── Org management ───────────────────────────────────────────────────────────
+
+    // POST /api/orgs — admin only, create an org
+    if (method === 'POST' && pathname === '/api/orgs') {
+      if (!userStore) { sendJson(res, 501, { error: 'User management not enabled' }); return; }
+      if (callerRole !== 'admin') { sendJson(res, 403, { error: 'Forbidden' }); return; }
+      let body: unknown;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { error: 'Request body must be a JSON object' });
+        return;
+      }
+      const payload = body as Record<string, unknown>;
+      const orgName = typeof payload['name'] === 'string' ? payload['name'] : null;
+      if (!orgName) {
+        sendJson(res, 400, { error: 'Missing required field: name' });
+        return;
+      }
+      try {
+        const org = userStore.createOrg(orgName);
+        // Add creator as org admin if they are a user (not legacy token)
+        if (caller.userId) {
+          userStore.addOrgMember(org.id, caller.userId, 'admin');
+        }
+        sendJson(res, 201, { org });
+      } catch {
+        sendJson(res, 409, { error: `Org name "${orgName}" already exists` });
+      }
+      return;
+    }
+
+    // GET /api/orgs — list orgs the caller belongs to
+    if (method === 'GET' && pathname === '/api/orgs') {
+      if (!userStore) { sendJson(res, 501, { error: 'User management not enabled' }); return; }
+      if (caller.userId) {
+        // Return only orgs the user is a member of
+        const memberships = userStore.getOrgMembership(caller.userId);
+        const orgs = memberships.map(m => {
+          const org = userStore.getOrg(m.orgId);
+          return org ? { ...org, memberRole: m.role } : null;
+        }).filter(Boolean);
+        sendJson(res, 200, { orgs });
+      } else {
+        // Legacy admin token — return all orgs
+        const orgs = userStore.listOrgs();
+        sendJson(res, 200, { orgs });
+      }
+      return;
+    }
+
+    // POST /api/orgs/:id/members — add member to org (org admin only)
+    const orgMembersMatch = pathname.match(/^\/api\/orgs\/([^/]+)\/members$/);
+    if (method === 'POST' && orgMembersMatch) {
+      if (!userStore) { sendJson(res, 501, { error: 'User management not enabled' }); return; }
+      const orgId = orgMembersMatch[1];
+      const org = userStore.getOrg(orgId);
+      if (!org) { sendJson(res, 404, { error: `Org "${orgId}" not found` }); return; }
+      // Check: caller must be org admin or global admin
+      const isglobalAdmin = callerRole === 'admin';
+      const isOrgAdmin = caller.userId ? userStore.getUserOrg(caller.userId, orgId)?.role === 'admin' : false;
+      if (!isglobalAdmin && !isOrgAdmin) { sendJson(res, 403, { error: 'Forbidden' }); return; }
+      let body: unknown;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { error: 'Request body must be a JSON object' });
+        return;
+      }
+      const payload = body as Record<string, unknown>;
+      const userId = typeof payload['userId'] === 'string' ? payload['userId'] : null;
+      const memberRole = typeof payload['role'] === 'string' ? payload['role'] : 'operator';
+      if (!userId) {
+        sendJson(res, 400, { error: 'Missing required field: userId' });
+        return;
+      }
+      const targetUser = userStore.getUser(userId);
+      if (!targetUser) { sendJson(res, 404, { error: `User "${userId}" not found` }); return; }
+      userStore.addOrgMember(orgId, userId, memberRole);
+      sendJson(res, 200, { orgId, userId, role: memberRole });
+      return;
+    }
+
+    // DELETE /api/orgs/:id/members/:userId — remove member from org (org admin only)
+    const orgMemberDeleteMatch = pathname.match(/^\/api\/orgs\/([^/]+)\/members\/([^/]+)$/);
+    if (method === 'DELETE' && orgMemberDeleteMatch) {
+      if (!userStore) { sendJson(res, 501, { error: 'User management not enabled' }); return; }
+      const orgId = orgMemberDeleteMatch[1];
+      const targetUserId = orgMemberDeleteMatch[2];
+      const org = userStore.getOrg(orgId);
+      if (!org) { sendJson(res, 404, { error: `Org "${orgId}" not found` }); return; }
+      const isglobalAdmin = callerRole === 'admin';
+      const isOrgAdmin = caller.userId ? userStore.getUserOrg(caller.userId, orgId)?.role === 'admin' : false;
+      if (!isglobalAdmin && !isOrgAdmin) { sendJson(res, 403, { error: 'Forbidden' }); return; }
+      userStore.removeOrgMember(orgId, targetUserId);
+      sendJson(res, 200, { removed: true });
       return;
     }
 

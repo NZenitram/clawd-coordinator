@@ -18,12 +18,13 @@ export interface Task {
   maxRetries: number;
   deadLettered: boolean;
   ownerUserId?: string;
+  orgId?: string;
 }
 
 export interface TaskStore {
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task;
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string }): Task;
   get(id: string): Task | null;
-  list(status?: TaskStatus): Task[];
+  list(status?: TaskStatus, orgId?: string): Task[];
   setRunning(id: string): void;
   appendOutput(id: string, data: string): boolean;
   setCompleted(id: string): void;
@@ -40,7 +41,7 @@ export class TaskTracker implements TaskStore {
     this.maxOutputLines = options?.maxOutputLines ?? 10000;
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string }): Task {
     const task: Task = {
       id: randomUUID(),
       agentName: params.agentName,
@@ -55,6 +56,7 @@ export class TaskTracker implements TaskStore {
       maxRetries: params.maxRetries ?? 3,
       deadLettered: false,
       ownerUserId: params.ownerUserId,
+      orgId: params.orgId,
     };
     this.tasks.set(task.id, task);
     return task;
@@ -64,10 +66,13 @@ export class TaskTracker implements TaskStore {
     return this.tasks.get(id) ?? null;
   }
 
-  list(status?: TaskStatus): Task[] {
-    const all = Array.from(this.tasks.values());
+  list(status?: TaskStatus, orgId?: string): Task[] {
+    let all = Array.from(this.tasks.values());
     if (status) {
-      return all.filter(t => t.status === status);
+      all = all.filter(t => t.status === status);
+    }
+    if (orgId !== undefined) {
+      all = all.filter(t => t.orgId === orgId);
     }
     return all;
   }

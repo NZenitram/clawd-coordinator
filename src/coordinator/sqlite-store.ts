@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   retry_count INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 3,
   dead_lettered INTEGER NOT NULL DEFAULT 0,
-  owner_user_id TEXT
+  owner_user_id TEXT,
+  org_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_output (
@@ -62,14 +63,14 @@ export class SqliteTaskStore implements TaskStore {
     }
   }
 
-  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string }): Task {
+  create(params: { agentName: string; prompt: string; sessionId?: string; traceId?: string; maxRetries?: number; ownerUserId?: string; orgId?: string }): Task {
     const id = randomUUID();
     const now = Date.now();
     const maxRetries = params.maxRetries ?? 3;
     this.db.run(
-      `INSERT INTO tasks (id, agent_name, prompt, session_id, trace_id, status, created_at, retry_count, max_retries, dead_lettered, owner_user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, params.agentName, params.prompt, params.sessionId ?? null, params.traceId ?? null, 'pending', now, 0, maxRetries, 0, params.ownerUserId ?? null]
+      `INSERT INTO tasks (id, agent_name, prompt, session_id, trace_id, status, created_at, retry_count, max_retries, dead_lettered, owner_user_id, org_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, params.agentName, params.prompt, params.sessionId ?? null, params.traceId ?? null, 'pending', now, 0, maxRetries, 0, params.ownerUserId ?? null, params.orgId ?? null]
     );
     this.save();
     return {
@@ -86,6 +87,7 @@ export class SqliteTaskStore implements TaskStore {
       maxRetries,
       deadLettered: false,
       ownerUserId: params.ownerUserId,
+      orgId: params.orgId,
     };
   }
 
@@ -103,12 +105,20 @@ export class SqliteTaskStore implements TaskStore {
     return this.rowToTask(row, output);
   }
 
-  list(status?: TaskStatus): Task[] {
+  list(status?: TaskStatus, orgId?: string): Task[] {
     let sql = 'SELECT * FROM tasks';
+    const conditions: string[] = [];
     const params: string[] = [];
     if (status) {
-      sql += ' WHERE status = ?';
+      conditions.push('status = ?');
       params.push(status);
+    }
+    if (orgId !== undefined) {
+      conditions.push('org_id = ?');
+      params.push(orgId);
+    }
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
     }
     sql += ' ORDER BY created_at ASC';
 
@@ -240,6 +250,7 @@ export class SqliteTaskStore implements TaskStore {
       maxRetries: (row.max_retries as number) ?? 3,
       deadLettered: (row.dead_lettered as number) === 1,
       ownerUserId: (row.owner_user_id as string) ?? undefined,
+      orgId: (row.org_id as string) ?? undefined,
     };
   }
 }

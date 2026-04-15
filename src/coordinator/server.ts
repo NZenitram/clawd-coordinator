@@ -65,33 +65,67 @@ export interface CoordinatorOptions {
   userStore?: UserStore;
 }
 
+export const DEFAULT_ORG_ID = '__default__';
+
+interface OrgState {
+  agentSockets: Map<string, WebSocket>;
+  cliSockets: Set<WebSocket>;
+  taskSubscribers: Map<string, Set<WebSocket>>;
+  taskOwners: Map<string, WebSocket>;
+  registry: AgentRegistry;
+  queue: TaskQueue;
+  sessionListPending: Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>;
+}
+
 export class Coordinator {
   private wss: WebSocketServer | null = null;
   private httpsServer: HttpsServer | null = null;
   private httpServer: HttpServer | null = null;
   private httpConnections = new Set<import('node:net').Socket>();
   private httpsConnections = new Set<import('node:stream').Duplex>();
-  private registry = new AgentRegistry();
   private tasks: TaskStore;
-  private agentSockets = new Map<string, WebSocket>();
-  private cliSockets = new Set<WebSocket>();
-  private taskSubscribers = new Map<string, Set<WebSocket>>();
   private stalenessTimer: ReturnType<typeof setInterval> | null = null;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private dedup = new MessageDeduplicator();
-  private taskOwners = new Map<string, WebSocket>();
-  /** Maps session-list requestId → { cliSocket, cliRequestId, timer } */
-  private sessionListPending = new Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }>();
-  private queue: TaskQueue;
   private options: CoordinatorOptions;
   private ipConnectionCounts = new Map<string, number>();
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private orgStates = new Map<string, OrgState>();
+
+  // Backward-compat aliases pointing at the default org's state
+  private get registry(): AgentRegistry { return this.getOrgState(DEFAULT_ORG_ID).registry; }
+  private get agentSockets(): Map<string, WebSocket> { return this.getOrgState(DEFAULT_ORG_ID).agentSockets; }
+  private get cliSockets(): Set<WebSocket> { return this.getOrgState(DEFAULT_ORG_ID).cliSockets; }
+  private get taskSubscribers(): Map<string, Set<WebSocket>> { return this.getOrgState(DEFAULT_ORG_ID).taskSubscribers; }
+  private get taskOwners(): Map<string, WebSocket> { return this.getOrgState(DEFAULT_ORG_ID).taskOwners; }
+  private get queue(): TaskQueue { return this.getOrgState(DEFAULT_ORG_ID).queue; }
+  private get sessionListPending(): Map<string, { cliSocket: WebSocket; cliRequestId: string; timer: ReturnType<typeof setTimeout> }> {
+    return this.getOrgState(DEFAULT_ORG_ID).sessionListPending;
+  }
+
+  private getOrgState(orgId: string): OrgState {
+    let state = this.orgStates.get(orgId);
+    if (!state) {
+      state = {
+        agentSockets: new Map(),
+        cliSockets: new Set(),
+        taskSubscribers: new Map(),
+        taskOwners: new Map(),
+        registry: new AgentRegistry(),
+        queue: new InMemoryTaskQueue(),
+        sessionListPending: new Map(),
+      };
+      this.orgStates.set(orgId, state);
+    }
+    return state;
+  }
 
   constructor(options: CoordinatorOptions) {
     this.options = options;
     this.tasks = options.store ?? new TaskTracker();
-    this.queue = options.queue ?? new InMemoryTaskQueue();
+    // Eagerly create the default org state
+    this.getOrgState(DEFAULT_ORG_ID);
   }
 
   async start(): Promise<void> {
@@ -105,21 +139,24 @@ export class Coordinator {
           return;
         }
         const token = (info.req.headers['authorization'] ?? '').replace(/^Bearer\s+/i, '');
-        // 1. Legacy shared token → admin (backward compat)
+        // 1. Legacy shared token → admin, default org (backward compat)
         if (validateToken(token, this.options.token)) {
-          (info.req as any).__user = { userId: null, role: 'admin' as UserRole };
+          (info.req as any).__user = { userId: null, role: 'admin' as UserRole, orgId: DEFAULT_ORG_ID };
           cb(true); return;
         }
-        // 2. Per-agent tokens → admin
+        // 2. Per-agent tokens → admin, default org
         if (this.options.agentTokens && validateAgentToken(token, this.options.agentTokens)) {
-          (info.req as any).__user = { userId: null, role: 'admin' as UserRole };
+          (info.req as any).__user = { userId: null, role: 'admin' as UserRole, orgId: DEFAULT_ORG_ID };
           cb(true); return;
         }
-        // 3. User API key via UserStore
+        // 3. User API key via UserStore — resolve org from user membership
         if (this.options.userStore) {
           const resolved = this.options.userStore.resolveApiKey(token);
           if (resolved) {
-            (info.req as any).__user = { userId: resolved.userId, role: resolved.role as UserRole };
+            const memberships = this.options.userStore.getOrgMembership(resolved.userId);
+            // Use the first org membership as the primary org; fall back to default
+            const orgId = memberships.length > 0 ? memberships[0].orgId : DEFAULT_ORG_ID;
+            (info.req as any).__user = { userId: resolved.userId, role: resolved.role as UserRole, orgId };
             cb(true); return;
           }
         }
@@ -129,10 +166,12 @@ export class Coordinator {
 
       const restHandler = createRestHandler({
         store: this.tasks,
-        registry: this.registry,
+        registry: this.getOrgState(DEFAULT_ORG_ID).registry,
         token: this.options.token,
-        queue: this.queue,
+        queue: this.getOrgState(DEFAULT_ORG_ID).queue,
         userStore: this.options.userStore,
+        getOrgRegistry: (orgId: string) => this.getOrgState(orgId).registry,
+        getOrgQueue: (orgId: string) => this.getOrgState(orgId).queue,
         relayAgentMessage: (fromAgent, toAgent, correlationId, topic, body) => {
           return this.relayAgentMessageSync(fromAgent, toAgent, correlationId, topic, body);
         },
@@ -180,40 +219,44 @@ export class Coordinator {
       const stalenessThreshold = this.options.stalenessThresholdMs ?? 90000;
       const stalenessInterval = this.options.stalenessCheckIntervalMs ?? 30000;
       this.stalenessTimer = setInterval(() => {
-        const stale = this.registry.getStaleAgents(stalenessThreshold);
-        for (const agent of stale) {
-          const socket = this.agentSockets.get(agent.name);
-          if (socket) {
-            socket.close(4002, 'Stale agent');
+        for (const [oid, state] of this.orgStates) {
+          const stale = state.registry.getStaleAgents(stalenessThreshold);
+          for (const agent of stale) {
+            const socket = state.agentSockets.get(agent.name);
+            if (socket) {
+              socket.close(4002, 'Stale agent');
+            }
+            logger.info({ agent: agent.name, orgId: oid }, 'Stale agent evicted');
+            state.registry.unregister(agent.name);
+            state.agentSockets.delete(agent.name);
           }
-          logger.info({ agent: agent.name }, 'Stale agent evicted');
-          this.registry.unregister(agent.name);
-          this.agentSockets.delete(agent.name);
-        }
-        const deadBusy = this.registry.getDeadBusyAgents(300000); // 5 min
-        for (const agent of deadBusy) {
-          for (const taskId of [...agent.currentTaskIds]) {
-            this.handleTaskFailure(taskId, agent.name, 'Agent became unresponsive');
+          const deadBusy = state.registry.getDeadBusyAgents(300000); // 5 min
+          for (const agent of deadBusy) {
+            for (const taskId of [...agent.currentTaskIds]) {
+              this.handleTaskFailureForOrg(taskId, agent.name, 'Agent became unresponsive', state);
+            }
+            const socket = state.agentSockets.get(agent.name);
+            if (socket) socket.close(4002, 'Unresponsive busy agent');
+            logger.info({ agent: agent.name, orgId: oid }, 'Dead busy agent evicted');
+            state.registry.unregister(agent.name);
+            state.agentSockets.delete(agent.name);
           }
-          const socket = this.agentSockets.get(agent.name);
-          if (socket) socket.close(4002, 'Unresponsive busy agent');
-          logger.info({ agent: agent.name }, 'Dead busy agent evicted');
-          this.registry.unregister(agent.name);
-          this.agentSockets.delete(agent.name);
         }
       }, stalenessInterval);
 
       const cleanupMaxAge = this.options.taskCleanupMaxAgeMs ?? 3600000; // 1 hour
       this.cleanupTimer = setInterval(() => {
         this.tasks.cleanup(cleanupMaxAge);
-        for (const taskId of this.taskOwners.keys()) {
-          if (!this.tasks.get(taskId)) {
-            this.taskOwners.delete(taskId);
+        for (const state of this.orgStates.values()) {
+          for (const taskId of state.taskOwners.keys()) {
+            if (!this.tasks.get(taskId)) {
+              state.taskOwners.delete(taskId);
+            }
           }
-        }
-        for (const taskId of this.taskSubscribers.keys()) {
-          if (!this.tasks.get(taskId)) {
-            this.taskSubscribers.delete(taskId);
+          for (const taskId of state.taskSubscribers.keys()) {
+            if (!this.tasks.get(taskId)) {
+              state.taskSubscribers.delete(taskId);
+            }
           }
         }
       }, 60000);
@@ -238,11 +281,13 @@ export class Coordinator {
     }
     this.retryTimers.clear();
     if (!this.wss) return;
-    for (const ws of this.agentSockets.values()) {
-      ws.close();
-    }
-    for (const ws of this.cliSockets) {
-      ws.close();
+    for (const state of this.orgStates.values()) {
+      for (const ws of state.agentSockets.values()) {
+        ws.close();
+      }
+      for (const ws of state.cliSockets) {
+        ws.close();
+      }
     }
     return new Promise((resolve) => {
       this.wss!.close(() => {
@@ -288,23 +333,26 @@ export class Coordinator {
     ws.on('pong', () => { (ws as any).__isAlive = true; });
 
     // Stash resolved user info on the socket for CLI permission checks
-    const user = (req as any).__user as { userId: string | null; role: UserRole } | undefined;
-    (ws as any).__user = user ?? { userId: null, role: 'admin' as UserRole };
+    const user = (req as any).__user as { userId: string | null; role: UserRole; orgId?: string } | undefined;
+    const orgId = user?.orgId ?? DEFAULT_ORG_ID;
+    (ws as any).__user = user ?? { userId: null, role: 'admin' as UserRole, orgId: DEFAULT_ORG_ID };
+    (ws as any).__orgId = orgId;
 
     if (path === '/agent') {
       (ws as any).__rateLimiter = new RateLimiter(AGENT_RATE_LIMIT_TOKENS, AGENT_RATE_LIMIT_INTERVAL_MS);
-      this.handleAgentConnection(ws);
+      this.handleAgentConnection(ws, orgId);
     } else if (path === '/cli') {
       (ws as any).__rateLimiter = new RateLimiter(CLI_RATE_LIMIT_TOKENS, CLI_RATE_LIMIT_INTERVAL_MS);
-      this.handleCliConnection(ws);
+      this.handleCliConnection(ws, orgId);
     } else {
       logger.warn({ path }, 'Unknown connection path');
       ws.close(4000, 'Unknown path');
     }
   }
 
-  private handleAgentConnection(ws: WebSocket): void {
+  private handleAgentConnection(ws: WebSocket, orgId: string = DEFAULT_ORG_ID): void {
     let agentName: string | null = null;
+    const state = this.getOrgState(orgId);
 
     ws.on('message', (raw) => {
       const limiter: RateLimiter | undefined = (ws as any).__rateLimiter;
@@ -328,40 +376,40 @@ export class Coordinator {
             return;
           }
           // Reject if agent name is already in use by a live connection
-          const existingSocket = this.agentSockets.get(requestedName);
+          const existingSocket = state.agentSockets.get(requestedName);
           if (existingSocket && existingSocket !== ws && existingSocket.readyState === WebSocket.OPEN) {
             logger.warn({ agent: requestedName }, 'Agent name hijack attempt rejected');
             ws.close(4003, `Agent name "${requestedName}" is already in use`);
             return;
           }
-          if (this.registry.get(requestedName)) {
-            this.registry.unregister(requestedName);
+          if (state.registry.get(requestedName)) {
+            state.registry.unregister(requestedName);
           }
           const rawMax = msg.payload.maxConcurrent;
           const maxConcurrent = (typeof rawMax === 'number' && Number.isInteger(rawMax) && rawMax >= 1 && rawMax <= 32) ? rawMax : 1;
-          this.registry.register(requestedName, {
+          state.registry.register(requestedName, {
             os: msg.payload.os,
             arch: msg.payload.arch,
             maxConcurrent,
           });
           if (msg.payload.health) {
-            this.registry.updateHealth(requestedName, {
+            state.registry.updateHealth(requestedName, {
               claudeAvailable: msg.payload.health.claudeAvailable,
               version: msg.payload.health.version,
             });
           }
-          this.agentSockets.set(requestedName, ws);
+          state.agentSockets.set(requestedName, ws);
           agentName = requestedName;
           metrics.incConnectedAgents();
-          logger.info({ agent: agentName, os: msg.payload.os, arch: msg.payload.arch }, 'Agent registered');
-          this.processQueue(requestedName);
+          logger.info({ agent: agentName, os: msg.payload.os, arch: msg.payload.arch, orgId }, 'Agent registered');
+          this.processQueueForOrg(requestedName, state);
           break;
         }
         case 'agent:heartbeat': {
           if (agentName) {
-            this.registry.heartbeat(agentName);
+            state.registry.heartbeat(agentName);
             if (msg.payload.health) {
-              this.registry.updateHealth(agentName, {
+              state.registry.updateHealth(agentName, {
                 claudeAvailable: msg.payload.health.claudeAvailable,
                 version: msg.payload.health.version,
               });
@@ -374,7 +422,7 @@ export class Coordinator {
           const outputTask = this.tasks.get(taskId);
           if (!outputTask || outputTask.agentName !== agentName) return;
           this.tasks.appendOutput(taskId, data);
-          const subscribers = this.taskSubscribers.get(taskId);
+          const subscribers = state.taskSubscribers.get(taskId);
           if (subscribers) {
             const outMsg = serializeMessage(msg);
             for (const cli of subscribers) {
@@ -393,10 +441,10 @@ export class Coordinator {
           metrics.observeTaskDuration(taskId);
           metrics.setActiveTasks(this.countActiveTasks());
           if (agentName) {
-            this.registry.removeTask(agentName, taskId);
-            this.processQueue(agentName);
+            state.registry.removeTask(agentName, taskId);
+            this.processQueueForOrg(agentName, state);
           }
-          const subs = this.taskSubscribers.get(taskId);
+          const subs = state.taskSubscribers.get(taskId);
           if (subs) {
             const completeMsg = serializeMessage(msg);
             for (const cli of subs) {
@@ -404,7 +452,7 @@ export class Coordinator {
                 cli.send(completeMsg);
               }
             }
-            this.taskSubscribers.delete(taskId);
+            state.taskSubscribers.delete(taskId);
           }
           break;
         }
@@ -416,15 +464,15 @@ export class Coordinator {
           metrics.incErrored();
           metrics.observeTaskDuration(taskId);
           metrics.setActiveTasks(this.countActiveTasks());
-          this.handleTaskFailure(taskId, agentName ?? '', error);
+          this.handleTaskFailureForOrg(taskId, agentName ?? '', error, state);
           break;
         }
         case 'session:list-response': {
           const { requestId, sessions, error } = msg.payload;
-          const pending = this.sessionListPending.get(requestId);
+          const pending = state.sessionListPending.get(requestId);
           if (!pending) break;
           clearTimeout(pending.timer);
-          this.sessionListPending.delete(requestId);
+          state.sessionListPending.delete(requestId);
           const { cliSocket, cliRequestId } = pending;
           if (cliSocket.readyState === WebSocket.OPEN) {
             cliSocket.send(serializeMessage(createCliResponse({
@@ -437,7 +485,7 @@ export class Coordinator {
         }
         case 'agent:message': {
           const { toAgent, correlationId } = msg.payload;
-          const targetSocket = this.agentSockets.get(toAgent);
+          const targetSocket = state.agentSockets.get(toAgent);
           if (!targetSocket) {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'unknown-agent' })));
@@ -459,7 +507,7 @@ export class Coordinator {
         }
         case 'agent:message-reply': {
           const { toAgent, correlationId } = msg.payload;
-          const targetSocket = this.agentSockets.get(toAgent);
+          const targetSocket = state.agentSockets.get(toAgent);
           if (!targetSocket) {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(serializeMessage(createAgentMessageAck({ correlationId, status: 'unknown-agent' })));
@@ -484,22 +532,23 @@ export class Coordinator {
 
     ws.on('close', () => {
       if (agentName) {
-        const agent = this.registry.get(agentName);
+        const agent = state.registry.get(agentName);
         if (agent && agent.currentTaskIds.length > 0) {
           for (const taskId of [...agent.currentTaskIds]) {
-            this.handleTaskFailure(taskId, agentName!, 'Agent disconnected while task was running');
+            this.handleTaskFailureForOrg(taskId, agentName!, 'Agent disconnected while task was running', state);
           }
         }
-        logger.info({ agent: agentName }, 'Agent disconnected');
+        logger.info({ agent: agentName, orgId }, 'Agent disconnected');
         metrics.decConnectedAgents();
-        this.registry.unregister(agentName);
-        this.agentSockets.delete(agentName);
+        state.registry.unregister(agentName);
+        state.agentSockets.delete(agentName);
       }
     });
   }
 
-  private handleCliConnection(ws: WebSocket): void {
-    this.cliSockets.add(ws);
+  private handleCliConnection(ws: WebSocket, orgId: string = DEFAULT_ORG_ID): void {
+    const state = this.getOrgState(orgId);
+    state.cliSockets.add(ws);
 
     ws.on('message', (raw) => {
       const limiter: RateLimiter | undefined = (ws as any).__rateLimiter;
@@ -514,28 +563,28 @@ export class Coordinator {
       if (this.dedup.isDuplicate(msg.id)) return;
 
       if (msg.type === 'cli:request') {
-        const user = (ws as any).__user as { userId: string | null; role: UserRole };
-        this.handleCliRequest(ws, msg.id, msg.payload, user);
+        const user = (ws as any).__user as { userId: string | null; role: UserRole; orgId?: string };
+        this.handleCliRequest(ws, msg.id, msg.payload, user, orgId);
       }
     });
 
     ws.on('close', () => {
-      this.cliSockets.delete(ws);
-      for (const [taskId, subs] of this.taskSubscribers) {
+      state.cliSockets.delete(ws);
+      for (const [taskId, subs] of state.taskSubscribers) {
         subs.delete(ws);
         if (subs.size === 0) {
-          this.taskSubscribers.delete(taskId);
+          state.taskSubscribers.delete(taskId);
         }
       }
-      for (const [taskId, owner] of this.taskOwners) {
+      for (const [taskId, owner] of state.taskOwners) {
         if (owner === ws) {
-          this.taskOwners.delete(taskId);
+          state.taskOwners.delete(taskId);
         }
       }
-      for (const [reqId, pending] of this.sessionListPending) {
+      for (const [reqId, pending] of state.sessionListPending) {
         if (pending.cliSocket === ws) {
           clearTimeout(pending.timer);
-          this.sessionListPending.delete(reqId);
+          state.sessionListPending.delete(reqId);
         }
       }
     });
@@ -547,24 +596,23 @@ export class Coordinator {
 
   /**
    * Central failure handler. Determines whether to retry or dead-letter a task.
+   * Uses org-scoped state for queue and subscriber tracking.
    */
-  private handleTaskFailure(taskId: string, agentName: string, error: string): void {
+  private handleTaskFailureForOrg(taskId: string, agentName: string, error: string, state: OrgState): void {
     const task = this.tasks.get(taskId);
     if (!task) return;
 
-    this.registry.removeTask(agentName, taskId);
+    state.registry.removeTask(agentName, taskId);
 
     // Only retry if the agent socket is still open (transient failure).
-    // If the socket is gone the agent disconnected and retrying to the same
-    // agent name would just enqueue to a ghost — fall through to dead-letter.
-    const agentSocket = this.agentSockets.get(agentName);
+    const agentSocket = state.agentSockets.get(agentName);
     const agentSocketOpen = agentSocket !== undefined && agentSocket.readyState === WebSocket.OPEN;
     if (agentSocketOpen && isRetryableError(error) && task.retryCount < task.maxRetries) {
       const delay = Math.min(5000 * Math.pow(2, task.retryCount), 60000);
       this.tasks.setRetrying(taskId);
       logger.info({ taskId, retryCount: task.retryCount + 1, delay }, 'Scheduling task retry');
 
-      const retrySubs = this.taskSubscribers.get(taskId);
+      const retrySubs = state.taskSubscribers.get(taskId);
       if (retrySubs) {
         const retryNote = serializeMessage(createTaskOutput({
           taskId,
@@ -579,8 +627,8 @@ export class Coordinator {
 
       const timer = setTimeout(() => {
         this.retryTimers.delete(taskId);
-        this.queue.enqueue(taskId, agentName);
-        this.processQueue(agentName);
+        state.queue.enqueue(taskId, agentName);
+        this.processQueueForOrg(agentName, state);
       }, delay);
       this.retryTimers.set(taskId, timer);
     } else {
@@ -594,7 +642,7 @@ export class Coordinator {
       }
       logger.error({ taskId, error }, 'Task dead-lettered');
 
-      const dlSubs = this.taskSubscribers.get(taskId);
+      const dlSubs = state.taskSubscribers.get(taskId);
       if (dlSubs) {
         const errMsg = serializeMessage(createTaskError({ taskId, error }));
         for (const cli of dlSubs) {
@@ -602,14 +650,15 @@ export class Coordinator {
             cli.send(errMsg);
           }
         }
-        this.taskSubscribers.delete(taskId);
+        state.taskSubscribers.delete(taskId);
       }
-      this.processQueue(agentName);
+      this.processQueueForOrg(agentName, state);
     }
   }
 
   /**
    * Synchronous relay for the REST POST /api/message endpoint.
+   * Searches across all org states for the target agent.
    */
   relayAgentMessageSync(
     fromAgent: string,
@@ -618,32 +667,37 @@ export class Coordinator {
     topic: string,
     body: string
   ): { status: 'delivered' | 'agent-offline' | 'unknown-agent' } {
-    const targetSocket = this.agentSockets.get(toAgent);
-    if (!targetSocket) return { status: 'unknown-agent' };
-    if (targetSocket.readyState !== WebSocket.OPEN) return { status: 'agent-offline' };
-    targetSocket.send(serializeMessage(createAgentMessage({ fromAgent, toAgent, correlationId, topic, body })));
-    logger.info({ from: fromAgent, to: toAgent, correlationId }, 'Agent message relayed via REST');
-    return { status: 'delivered' };
+    // Search all org states for the target agent
+    for (const state of this.orgStates.values()) {
+      const targetSocket = state.agentSockets.get(toAgent);
+      if (targetSocket) {
+        if (targetSocket.readyState !== WebSocket.OPEN) return { status: 'agent-offline' };
+        targetSocket.send(serializeMessage(createAgentMessage({ fromAgent, toAgent, correlationId, topic, body })));
+        logger.info({ from: fromAgent, to: toAgent, correlationId }, 'Agent message relayed via REST');
+        return { status: 'delivered' };
+      }
+    }
+    return { status: 'unknown-agent' };
   }
 
-  private processQueue(agentName: string): void {
-    while (this.registry.hasCapacity(agentName)) {
-      const taskId = this.queue.dequeue(agentName);
+  private processQueueForOrg(agentName: string, state: OrgState): void {
+    while (state.registry.hasCapacity(agentName)) {
+      const taskId = state.queue.dequeue(agentName);
       if (!taskId) break;
 
       const task = this.tasks.get(taskId);
       if (!task || task.status !== 'pending') continue;
 
-      if (!this.registry.tryAddTask(agentName, task.id)) break;
+      if (!state.registry.tryAddTask(agentName, task.id)) break;
 
       metrics.incDispatched();
       metrics.recordTaskStart(taskId);
-      metrics.setQueueDepth(this.queue.depth());
+      metrics.setQueueDepth(state.queue.depth());
       metrics.setActiveTasks(this.countActiveTasks() + 1);
       this.tasks.setRunning(taskId);
       logger.info({ agent: agentName, taskId, traceId: task.traceId }, 'Queued task dispatched');
 
-      const agentWs = this.agentSockets.get(agentName);
+      const agentWs = state.agentSockets.get(agentName);
       if (agentWs && agentWs.readyState === WebSocket.OPEN) {
         agentWs.send(serializeMessage(createTaskDispatch({
           taskId,
@@ -653,7 +707,7 @@ export class Coordinator {
         })));
       } else {
         logger.error({ agent: agentName, taskId }, 'Agent socket not open for queued dispatch');
-        this.handleTaskFailure(taskId, agentName, 'socket not open at dispatch time');
+        this.handleTaskFailureForOrg(taskId, agentName, 'socket not open at dispatch time', state);
       }
     }
   }
@@ -672,9 +726,11 @@ export class Coordinator {
     ws: WebSocket,
     requestId: string,
     payload: { command: string; args?: Record<string, unknown> },
-    user: { userId: string | null; role: UserRole } = { userId: null, role: 'admin' }
+    user: { userId: string | null; role: UserRole; orgId?: string } = { userId: null, role: 'admin' },
+    orgId: string = DEFAULT_ORG_ID
   ): void {
     const { command, args } = payload;
+    const state = this.getOrgState(orgId);
 
     // RBAC permission check
     if (!checkPermission(user.role, command)) {
@@ -684,7 +740,7 @@ export class Coordinator {
 
     switch (command) {
       case 'list-agents': {
-        const agents = this.registry.list();
+        const agents = state.registry.list();
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { agents },
@@ -697,7 +753,7 @@ export class Coordinator {
           this.sendError(ws, requestId, 'Missing required argument: name');
           return;
         }
-        const agent = this.registry.get(name);
+        const agent = state.registry.get(name);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { agent },
@@ -712,7 +768,7 @@ export class Coordinator {
           return;
         }
         const sessionId = typeof args?.sessionId === 'string' ? args.sessionId : undefined;
-        const agent = this.registry.get(agentName);
+        const agent = state.registry.get(agentName);
 
         if (!agent) {
           this.sendError(ws, requestId, `Agent "${agentName}" not found`);
@@ -726,22 +782,22 @@ export class Coordinator {
         const traceId = randomUUID();
         const rawBudget = args?.maxBudgetUsd;
         const maxBudgetUsd = (typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 && rawBudget <= 10000) ? rawBudget : undefined;
-        const task = this.tasks.create({ agentName, prompt, sessionId, traceId, ownerUserId: user.userId ?? undefined });
-        this.taskOwners.set(task.id, ws);
+        const task = this.tasks.create({ agentName, prompt, sessionId, traceId, ownerUserId: user.userId ?? undefined, orgId });
+        state.taskOwners.set(task.id, ws);
 
-        if (!this.taskSubscribers.has(task.id)) {
-          this.taskSubscribers.set(task.id, new Set());
+        if (!state.taskSubscribers.has(task.id)) {
+          state.taskSubscribers.set(task.id, new Set());
         }
-        this.taskSubscribers.get(task.id)!.add(ws);
+        state.taskSubscribers.get(task.id)!.add(ws);
 
         // Try immediate dispatch; if at capacity, queue the task
-        if (!this.registry.tryAddTask(agentName, task.id)) {
-          this.queue.enqueue(task.id, agentName);
-          metrics.setQueueDepth(this.queue.depth());
-          logger.info({ agent: agentName, taskId: task.id, traceId, queueDepth: this.queue.depth() }, 'Task queued');
+        if (!state.registry.tryAddTask(agentName, task.id)) {
+          state.queue.enqueue(task.id, agentName);
+          metrics.setQueueDepth(state.queue.depth());
+          logger.info({ agent: agentName, taskId: task.id, traceId, queueDepth: state.queue.depth() }, 'Task queued');
           ws.send(serializeMessage(createCliResponse({
             requestId,
-            data: { taskId: task.id, status: 'queued', queueDepth: this.queue.depth() },
+            data: { taskId: task.id, status: 'queued', queueDepth: state.queue.depth() },
           })));
           break;
         }
@@ -750,9 +806,9 @@ export class Coordinator {
         metrics.recordTaskStart(task.id);
         metrics.setActiveTasks(this.countActiveTasks() + 1);
         this.tasks.setRunning(task.id);
-        logger.info({ agent: agentName, taskId: task.id, traceId }, 'Task dispatched');
+        logger.info({ agent: agentName, taskId: task.id, traceId, orgId }, 'Task dispatched');
 
-        const agentWs = this.agentSockets.get(agentName);
+        const agentWs = state.agentSockets.get(agentName);
         if (agentWs && agentWs.readyState === WebSocket.OPEN) {
           agentWs.send(serializeMessage(createTaskDispatch({
             taskId: task.id,
@@ -764,7 +820,7 @@ export class Coordinator {
         } else {
           logger.error({ agent: agentName, taskId: task.id, traceId }, 'Agent socket not open, dispatch not delivered');
           this.tasks.setError(task.id, 'Agent socket not open at dispatch time');
-          this.registry.removeTask(agentName, task.id);
+          state.registry.removeTask(agentName, task.id);
           this.sendError(ws, requestId, `Agent "${agentName}" is not reachable`);
           return;
         }
@@ -782,7 +838,7 @@ export class Coordinator {
           this.sendError(ws, requestId, `Invalid status filter: ${statusArg}. Valid: ${validStatuses.join(', ')}`);
           return;
         }
-        const tasks = this.tasks.list(statusArg as TaskStatus | undefined);
+        const tasks = this.tasks.list(statusArg as TaskStatus | undefined, orgId);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { tasks },
@@ -795,7 +851,7 @@ export class Coordinator {
           this.sendError(ws, requestId, 'Missing required argument: taskId');
           return;
         }
-        const taskOwner = this.taskOwners.get(taskId);
+        const taskOwner = state.taskOwners.get(taskId);
         if (taskOwner && taskOwner !== ws) {
           this.sendError(ws, requestId, 'Not authorized to access this task');
           return;
@@ -813,15 +869,15 @@ export class Coordinator {
           this.sendError(ws, requestId, 'Missing required argument: taskId');
           return;
         }
-        const subOwner = this.taskOwners.get(taskId);
+        const subOwner = state.taskOwners.get(taskId);
         if (subOwner && subOwner !== ws) {
           this.sendError(ws, requestId, 'Not authorized to subscribe to this task');
           return;
         }
-        if (!this.taskSubscribers.has(taskId)) {
-          this.taskSubscribers.set(taskId, new Set());
+        if (!state.taskSubscribers.has(taskId)) {
+          state.taskSubscribers.set(taskId, new Set());
         }
-        this.taskSubscribers.get(taskId)!.add(ws);
+        state.taskSubscribers.get(taskId)!.add(ws);
         ws.send(serializeMessage(createCliResponse({
           requestId,
           data: { subscribed: true, taskId },
@@ -834,25 +890,25 @@ export class Coordinator {
           this.sendError(ws, requestId, 'Missing required argument: agentName');
           return;
         }
-        const agent = this.registry.get(agentName);
+        const agent = state.registry.get(agentName);
         if (!agent) {
           this.sendError(ws, requestId, `Agent "${agentName}" not found`);
           return;
         }
-        const agentWs = this.agentSockets.get(agentName);
+        const agentWs = state.agentSockets.get(agentName);
         if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
           this.sendError(ws, requestId, `Agent "${agentName}" is not reachable`);
           return;
         }
         // Use requestId as the correlation key so we can route the response back
         const timer = setTimeout(() => {
-          const pending = this.sessionListPending.get(requestId);
+          const pending = state.sessionListPending.get(requestId);
           if (pending) {
-            this.sessionListPending.delete(requestId);
+            state.sessionListPending.delete(requestId);
             this.sendError(pending.cliSocket, pending.cliRequestId, 'Session list request timed out');
           }
         }, 30000);
-        this.sessionListPending.set(requestId, { cliSocket: ws, cliRequestId: requestId, timer });
+        state.sessionListPending.set(requestId, { cliSocket: ws, cliRequestId: requestId, timer });
         agentWs.send(serializeMessage(createSessionListRequest({
           agentName,
           requestId,
