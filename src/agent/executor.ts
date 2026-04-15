@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { shellOpts } from '../shared/platform.js';
 
 export interface RunOptions {
   prompt: string;
@@ -74,10 +75,10 @@ export class Executor {
     const taskId = options.taskId ?? `anonymous-${Date.now()}`;
 
     return new Promise<RunResult>((resolve) => {
-      const proc = spawn('claude', args, {
+      const proc = spawn('claude', args, shellOpts({
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      }));
 
       this.processes.set(taskId, proc);
       let timedOut = false;

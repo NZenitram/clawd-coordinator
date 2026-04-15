@@ -2,7 +2,9 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import * as tar from 'tar';
+import type { TarOptionsWithAliasesAsyncNoFile } from 'tar';
+import type { Writable } from 'node:stream';
 import WebSocket from 'ws';
 import { logger } from '../shared/logger.js';
 import { safeSend } from '../shared/ws-utils.js';
@@ -161,17 +163,25 @@ export class FileSender {
     };
     safeSend(ws, serializeMessage(createFileTransferStart(startPayload)));
 
-    const excludeFlags: string[] = [];
+    // Build exclude filter from patterns (sanitized to avoid path injection)
+    const excludePatterns: string[] = [];
     for (const pattern of exclude) {
-      // Sanitize: reject patterns that could be interpreted as tar flags
       const sanitized = pattern.replace(/[^\w.*?/\-[\]{}]/g, '');
       if (sanitized && !sanitized.startsWith('-')) {
-        excludeFlags.push(`--exclude=${sanitized}`);
+        excludePatterns.push(sanitized);
       }
     }
 
-    const tarArgs = ['-c', ...excludeFlags, '-C', baseDir, '.'];
-    const tar = spawn('tar', tarArgs);
+    const filterFn: TarOptionsWithAliasesAsyncNoFile['filter'] = excludePatterns.length > 0
+      ? (entryPath: string) => !excludePatterns.some((p) => {
+          // Simple glob: support * wildcard
+          const escaped = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+          return new RegExp(`(^|/)${escaped}($|/)`).test(entryPath);
+        })
+      : undefined;
+
+    const createOpts: TarOptionsWithAliasesAsyncNoFile = { cwd: baseDir, gzip: false, filter: filterFn };
+    const tarStream = tar.create(createOpts, ['.']);
 
     let chunkIndex = 0;
     const hash = createHash('sha256');
@@ -179,8 +189,8 @@ export class FileSender {
     await new Promise<void>((resolve, reject) => {
       let buffer = Buffer.alloc(0);
 
-      tar.stdout.on('data', async (chunk: Buffer) => {
-        tar.stdout.pause();
+      tarStream.on('data', async (chunk: Buffer) => {
+        tarStream.pause();
         hash.update(chunk);
         buffer = Buffer.concat([buffer, chunk]);
 
@@ -193,10 +203,10 @@ export class FileSender {
           await this.waitForAck(transferId, currentIndex);
         }
 
-        tar.stdout.resume();
+        tarStream.resume();
       });
 
-      tar.stdout.on('end', async () => {
+      tarStream.on('end', async () => {
         // Flush remaining bytes
         if (buffer.length > 0) {
           const data = buffer.toString('base64');
@@ -209,14 +219,7 @@ export class FileSender {
         resolve();
       });
 
-      tar.stderr.on('data', (d: Buffer) => {
-        logger.warn({ transferId, stderr: d.toString() }, 'tar stderr');
-      });
-
-      tar.on('error', reject);
-      tar.on('close', (code) => {
-        if (code !== 0) reject(new Error(`tar exited with code ${code}`));
-      });
+      tarStream.on('error', reject);
     });
   }
 }
@@ -228,7 +231,9 @@ const MAX_TRANSFER_BYTES = 2 * 1024 * 1024 * 1024; // 2GB default limit
 interface ReceiverSession {
   metadata: FileTransferStartPayload;
   destPath: string;
-  tarProcess?: ReturnType<typeof spawn>;
+  /** Set when receiving a directory — a tar.extract() writable stream */
+  tarSink?: Writable;
+  /** Set when receiving a plain file */
   fileStream?: fs.WriteStream;
   bytesReceived: number;
   maxBytes: number;
@@ -262,27 +267,36 @@ export class FileReceiver {
       if (metadata.isDirectory) {
         // Ensure destination directory exists
         fs.mkdirSync(destPath, { recursive: true });
-        const tar = spawn('tar', ['-x', '-C', destPath]);
-        const session: ReceiverSession = { metadata, destPath, tarProcess: tar, bytesReceived: 0, maxBytes: MAX_TRANSFER_BYTES, resolve, reject };
+        const extractStream = tar.extract({ cwd: destPath }) as unknown as Writable;
+        const session: ReceiverSession = {
+          metadata,
+          destPath,
+          tarSink: extractStream,
+          bytesReceived: 0,
+          maxBytes: MAX_TRANSFER_BYTES,
+          resolve,
+          reject,
+        };
         this.sessions.set(transferId, session);
 
-        tar.stderr.on('data', (d: Buffer) => {
-          logger.warn({ transferId, stderr: d.toString() }, 'tar (receive) stderr');
-        });
-        tar.on('error', reject);
-        tar.on('close', (code) => {
-          if (code !== 0) reject(new Error(`tar -x exited with code ${code}`));
-          // resolve() is called by handleComplete
-        });
+        extractStream.on('error', (err: Error) => reject(err));
       } else {
         // Ensure parent directory exists
         const parentDir = path.dirname(destPath);
         fs.mkdirSync(parentDir, { recursive: true });
         const fileStream = fs.createWriteStream(destPath);
-        const session: ReceiverSession = { metadata, destPath, fileStream, bytesReceived: 0, maxBytes: MAX_TRANSFER_BYTES, resolve, reject };
+        const session: ReceiverSession = {
+          metadata,
+          destPath,
+          fileStream,
+          bytesReceived: 0,
+          maxBytes: MAX_TRANSFER_BYTES,
+          resolve,
+          reject,
+        };
         this.sessions.set(transferId, session);
 
-        fileStream.on('error', reject);
+        fileStream.on('error', (err: Error) => reject(err));
       }
     });
   }
@@ -303,8 +317,8 @@ export class FileReceiver {
       return null;
     }
 
-    if (session.tarProcess) {
-      session.tarProcess.stdin?.write(raw);
+    if (session.tarSink) {
+      session.tarSink.write(raw);
     } else if (session.fileStream) {
       session.fileStream.write(raw);
     }
@@ -320,13 +334,9 @@ export class FileReceiver {
     if (!session) return;
     this.sessions.delete(complete.transferId);
 
-    if (session.tarProcess) {
-      session.tarProcess.stdin?.end(() => {
-        // resolve happens in tar 'close' event — but only if exit code is 0
-        // We hook resolve here so we don't double-resolve
-        session.tarProcess!.on('close', (code) => {
-          if (code === 0) session.resolve();
-        });
+    if (session.tarSink) {
+      session.tarSink.end(() => {
+        session.resolve();
       });
     } else if (session.fileStream) {
       session.fileStream.end(() => {
@@ -343,8 +353,8 @@ export class FileReceiver {
     if (!session) return;
     this.sessions.delete(transferId);
 
-    if (session.tarProcess) {
-      session.tarProcess.kill();
+    if (session.tarSink) {
+      session.tarSink.destroy();
     }
     if (session.fileStream) {
       session.fileStream.destroy();
@@ -369,7 +379,7 @@ export class FileReceiver {
   /** Clean up all active sessions (for shutdown/disconnect) */
   cleanupAll(): void {
     for (const [transferId, session] of this.sessions) {
-      if (session.tarProcess) session.tarProcess.kill();
+      if (session.tarSink) session.tarSink.destroy();
       if (session.fileStream) session.fileStream.destroy();
       try {
         if (fs.existsSync(session.destPath)) {

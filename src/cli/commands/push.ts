@@ -6,7 +6,8 @@ import { requireConfig } from '../../shared/config.js';
 import { connectCli, sendRequest } from '../output.js';
 import { parseMessage, serializeMessage, createFileChunk, createFileTransferStart, createFileTransferComplete, type FileChunkAckPayload } from '../../protocol/messages.js';
 import WebSocket from 'ws';
-import { spawn } from 'node:child_process';
+import * as tar from 'tar';
+import type { TarOptionsWithAliasesAsyncNoFile } from 'tar';
 
 const CHUNK_SIZE = 512 * 1024;
 
@@ -50,13 +51,17 @@ async function pushFile(
   const filename = path.basename(sourcePath);
 
   if (isDirectory) {
-    // Use tar to stream directory
-    const excludeFlags: string[] = [];
-    for (const pattern of exclude) {
-      excludeFlags.push(`--exclude=${pattern}`);
-    }
-    const tarArgs = ['-c', ...excludeFlags, '-C', sourcePath, '.'];
-    const tar = spawn('tar', tarArgs);
+    // Build exclude filter from patterns
+    const excludePatterns = exclude.slice();
+    const filterFn: TarOptionsWithAliasesAsyncNoFile['filter'] = excludePatterns.length > 0
+      ? (entryPath: string) => !excludePatterns.some((p) => {
+          const escaped = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+          return new RegExp(`(^|/)${escaped}($|/)`).test(entryPath);
+        })
+      : undefined;
+
+    const createOpts: TarOptionsWithAliasesAsyncNoFile = { cwd: sourcePath, gzip: false, filter: filterFn };
+    const tarStream = tar.create(createOpts, ['.']);
 
     // Send transfer-start (size=0 since we don't know tar output size)
     ws.send(serializeMessage(createFileTransferStart({
@@ -78,8 +83,8 @@ async function pushFile(
     let chunkIndex = 0;
 
     await new Promise<void>((resolve, reject) => {
-      tar.stdout.on('data', async (chunk: Buffer) => {
-        tar.stdout.pause();
+      tarStream.on('data', async (chunk: Buffer) => {
+        tarStream.pause();
         buffer = Buffer.concat([buffer, chunk]);
 
         while (buffer.length >= CHUNK_SIZE) {
@@ -92,10 +97,10 @@ async function pushFile(
           await waitForAck(ws, transferId, idx);
         }
 
-        tar.stdout.resume();
+        tarStream.resume();
       });
 
-      tar.stdout.on('end', async () => {
+      tarStream.on('end', async () => {
         if (buffer.length > 0) {
           const data = buffer.toString('base64');
           const idx = chunkIndex++;
@@ -106,10 +111,7 @@ async function pushFile(
         resolve();
       });
 
-      tar.on('error', reject);
-      tar.on('close', (code) => {
-        if (code !== 0) reject(new Error(`tar exited with code ${code}`));
-      });
+      tarStream.on('error', reject);
     });
   } else {
     const totalChunks = Math.max(1, Math.ceil(size / CHUNK_SIZE));

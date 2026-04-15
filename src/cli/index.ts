@@ -25,6 +25,7 @@ import { templatesCommand } from './commands/templates.js';
 import { scheduleCommand } from './commands/schedule.js';
 import { webhookCommand } from './commands/webhook.js';
 import { poolsCommand } from './commands/pools.js';
+import { setupCommand } from './commands/setup.js';
 
 const program = new Command();
 
@@ -60,5 +61,6 @@ program.addCommand(templatesCommand);
 program.addCommand(scheduleCommand);
 program.addCommand(webhookCommand);
 program.addCommand(poolsCommand);
+program.addCommand(setupCommand);
 
 program.parse();

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { shellOpts } from '../shared/platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -11,7 +12,7 @@ export interface HealthStatus {
 
 export async function checkClaudeHealth(): Promise<HealthStatus> {
   try {
-    const { stdout } = await execFileAsync('claude', ['--version'], { timeout: 10000 });
+    const { stdout } = await execFileAsync('claude', ['--version'], shellOpts({ timeout: 10000 }));
     const version = stdout.trim().replace(/[\x00-\x1f\x7f]/g, '').slice(0, 200);
     return { available: true, version };
   } catch (err) {

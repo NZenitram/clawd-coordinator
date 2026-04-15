@@ -1,8 +1,9 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { shellOpts } from '../shared/platform.js';
 
 const execFile = promisify(execFileCb);
 
@@ -35,7 +36,7 @@ export class WorktreeStrategy implements IsolationStrategy {
 
   async setup(taskId: string, baseDir: string): Promise<string> {
     const worktreePath = join(baseDir, '.worktrees', taskId);
-    await execFile('git', ['worktree', 'add', worktreePath, '-d'], { cwd: baseDir });
+    await execFile('git', ['worktree', 'add', worktreePath, '-d'], shellOpts({ cwd: baseDir }));
     this.worktreePaths.set(taskId, worktreePath);
     return worktreePath;
   }
@@ -43,7 +44,7 @@ export class WorktreeStrategy implements IsolationStrategy {
   async cleanup(taskId: string): Promise<void> {
     const worktreePath = this.worktreePaths.get(taskId);
     if (!worktreePath) return;
-    await execFile('git', ['worktree', 'remove', '--force', worktreePath], {});
+    await execFile('git', ['worktree', 'remove', '--force', worktreePath], shellOpts());
     this.worktreePaths.delete(taskId);
   }
 
@@ -56,7 +57,7 @@ export class WorktreeStrategy implements IsolationStrategy {
     const worktreesDir = join(baseDir, '.worktrees');
     let stdout: string;
     try {
-      ({ stdout } = await execFile('git', ['worktree', 'list', '--porcelain'], { cwd: baseDir }));
+      ({ stdout } = await execFile('git', ['worktree', 'list', '--porcelain'], shellOpts({ cwd: baseDir })));
     } catch {
       // Not a git repo or git not available — nothing to prune
       return;
@@ -75,7 +76,7 @@ export class WorktreeStrategy implements IsolationStrategy {
 
     for (const worktreePath of stale) {
       try {
-        await execFile('git', ['worktree', 'remove', '--force', worktreePath], { cwd: baseDir });
+        await execFile('git', ['worktree', 'remove', '--force', worktreePath], shellOpts({ cwd: baseDir }));
         const { logger } = await import('../shared/logger.js');
         logger.info({ worktreePath }, 'Pruned orphan worktree');
       } catch {
@@ -95,7 +96,7 @@ export class TempDirStrategy implements IsolationStrategy {
   async setup(taskId: string, baseDir: string): Promise<string> {
     const prefix = join(tmpdir(), `coord-task-`);
     const tempDir = await mkdtemp(prefix);
-    await execFile('cp', ['-r', baseDir + '/.', tempDir]);
+    await cp(baseDir, tempDir, { recursive: true });
     this.tempPaths.set(taskId, tempDir);
     return tempDir;
   }

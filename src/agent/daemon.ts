@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { platform, arch } from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { shellOpts } from '../shared/platform.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -356,9 +357,9 @@ export class AgentDaemon {
   private async handleSessionListRequest(agentName: string, requestId: string): Promise<void> {
     logger.info({ agentName }, 'Session list requested');
     try {
-      const { stdout } = await execFileAsync('claude', ['sessions', 'list', '--output', 'json'], {
+      const { stdout } = await execFileAsync('claude', ['sessions', 'list', '--output', 'json'], shellOpts({
         timeout: 15000,
-      });
+      }));
       let sessions: SessionInfo[] = [];
       try {
         const parsed = JSON.parse(stdout.trim());
@@ -464,15 +465,15 @@ export class AgentDaemon {
 
       // git pull
       logger.info({ packageDir }, 'Self-update: git pull');
-      await execFileAsync('git', ['pull'], { cwd: packageDir, timeout: 30000 });
+      await execFileAsync('git', ['pull'], shellOpts({ cwd: packageDir, timeout: 30000 }));
 
       // npm install
       logger.info({ packageDir }, 'Self-update: npm install');
-      await execFileAsync('npm', ['install'], { cwd: packageDir, timeout: 120000 });
+      await execFileAsync('npm', ['install'], shellOpts({ cwd: packageDir, timeout: 120000 }));
 
       // npm run build
       logger.info({ packageDir }, 'Self-update: npm run build');
-      await execFileAsync('npm', ['run', 'build'], { cwd: packageDir, timeout: 60000 });
+      await execFileAsync('npm', ['run', 'build'], shellOpts({ cwd: packageDir, timeout: 60000 }));
 
       // Get new version after build
       try {

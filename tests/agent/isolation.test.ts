@@ -16,10 +16,22 @@ vi.mock('node:child_process', () => ({
   }),
 }));
 
+// Mock fs/promises cp — TempDirStrategy uses fs.cp instead of execFile('cp')
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    cp: vi.fn(async (_src: string, _dest: string, _opts?: object) => {
+      // no-op: tests verify cp is called with correct args
+    }),
+  };
+});
+
 // Import after mock is registered
 const { NoneStrategy, WorktreeStrategy, TempDirStrategy, createIsolationStrategy } =
   await import('../../src/agent/isolation.js');
 const { execFile } = await import('node:child_process');
+const { cp } = await import('node:fs/promises');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NoneStrategy
@@ -144,21 +156,6 @@ describe('TempDirStrategy', () => {
     // Use a real temp directory as baseDir, create a sample file inside it
     baseDir = await mkdtemp(join(tmpdir(), 'coord-test-base-'));
     await writeFile(join(baseDir, 'sample.txt'), 'hello');
-
-    // For TempDirStrategy, execFile is used for `cp -r`:
-    //   execFile('cp', ['-r', src, dest], cb)   — 3-arg form (no opts)
-    // Simulate cp by writing a marker file into the destination directory.
-    (execFile as any).mockImplementation((...callArgs: any[]) => {
-      const cb: Function = typeof callArgs[callArgs.length - 1] === 'function'
-        ? callArgs[callArgs.length - 1]
-        : null;
-      // callArgs[1] is the args array: ['-r', src, dest]
-      const fileArgs: string[] = callArgs[1];
-      const dest = fileArgs[2];
-      writeFile(join(dest, 'sample.txt'), 'hello')
-        .then(() => { if (cb) cb(null, { stdout: '', stderr: '' }); })
-        .catch((err) => { if (cb) cb(err); });
-    });
   });
 
   it('setup creates a temp directory distinct from baseDir', async () => {
@@ -173,14 +170,14 @@ describe('TempDirStrategy', () => {
     await strategy.cleanup('task-tmp-1');
   });
 
-  it('setup calls cp -r with correct src and dest', async () => {
+  it('setup calls fs.cp with correct src and dest (recursive)', async () => {
     const strategy = new TempDirStrategy();
     const result = await strategy.setup('task-tmp-2', baseDir);
 
-    expect(execFile).toHaveBeenCalledWith(
-      'cp',
-      ['-r', baseDir + '/.', result],
-      expect.any(Function),
+    expect(cp).toHaveBeenCalledWith(
+      baseDir,
+      result,
+      { recursive: true },
     );
 
     await strategy.cleanup('task-tmp-2');

@@ -6,7 +6,8 @@ import { requireConfig } from '../../shared/config.js';
 import { connectCli, sendRequest } from '../output.js';
 import { parseMessage, serializeMessage, createFileChunkAck, type FileTransferStartPayload, type FileChunkPayload, type FileTransferCompletePayload } from '../../protocol/messages.js';
 import WebSocket from 'ws';
-import { spawn } from 'node:child_process';
+import * as tar from 'tar';
+import type { Writable } from 'node:stream';
 
 async function pullFile(
   ws: WebSocket,
@@ -15,12 +16,12 @@ async function pullFile(
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let metadata: FileTransferStartPayload | null = null;
-    let tarProcess: ReturnType<typeof spawn> | null = null;
+    let extractStream: Writable | null = null;
     let fileStream: fs.WriteStream | null = null;
     let chunksReceived = 0;
 
     function cleanup(err?: Error): void {
-      tarProcess?.kill();
+      extractStream?.destroy();
       fileStream?.destroy();
       if (err) reject(err);
       else resolve();
@@ -37,11 +38,8 @@ async function pullFile(
 
         if (p.isDirectory) {
           fs.mkdirSync(destPath, { recursive: true });
-          tarProcess = spawn('tar', ['-x', '-C', destPath]);
-          tarProcess.stderr?.on('data', (d: Buffer) => process.stderr.write(d));
-          tarProcess.on('close', (code) => {
-            if (code !== 0) cleanup(new Error(`tar -x exited with code ${code}`));
-          });
+          extractStream = tar.extract({ cwd: destPath }) as unknown as Writable;
+          extractStream.on('error', (err: Error) => cleanup(err));
         } else {
           const parentDir = path.dirname(destPath);
           fs.mkdirSync(parentDir, { recursive: true });
@@ -57,8 +55,8 @@ async function pullFile(
         if (chunk.transferId !== transferId) return;
         const raw2 = Buffer.from(chunk.data, 'base64');
 
-        if (tarProcess) {
-          tarProcess.stdin?.write(raw2);
+        if (extractStream) {
+          extractStream.write(raw2);
         } else if (fileStream) {
           fileStream.write(raw2);
         }
@@ -79,13 +77,8 @@ async function pullFile(
         if (complete.transferId !== transferId) return;
         process.stderr.write('\n');
 
-        if (tarProcess) {
-          tarProcess.stdin?.end(() => {
-            tarProcess!.on('close', (code) => {
-              if (code === 0) resolve();
-              else cleanup(new Error(`tar -x exited with code ${code}`));
-            });
-          });
+        if (extractStream) {
+          extractStream.end(() => resolve());
         } else if (fileStream) {
           fileStream.end(() => resolve());
         } else {
