@@ -251,6 +251,69 @@ describe('CoordMcpServer tool handlers', () => {
   });
 
   // ------------------------------------------------------------------
+  // send_agent_message
+  // ------------------------------------------------------------------
+  describe('send_agent_message', () => {
+    it('returns correlationId and status on success', async () => {
+      mockSendRequest.mockResolvedValue(
+        makeResponse({ correlationId: 'corr-123', status: 'delivered' }),
+      );
+
+      const handler = getToolHandler(server, 'send_agent_message');
+      const result = await handler({
+        fromAgent: 'agent-a',
+        toAgent: 'agent-b',
+        topic: 'ping',
+        body: 'hello',
+      }) as { content: Array<{ type: string; text: string }> };
+
+      expect(mockSendRequest).toHaveBeenCalledWith(fakeWs, 'send-message', {
+        fromAgent: 'agent-a',
+        toAgent: 'agent-b',
+        topic: 'ping',
+        body: 'hello',
+      });
+
+      expect(result.content).toHaveLength(1);
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.correlationId).toBe('corr-123');
+      expect(parsed.status).toBe('delivered');
+    });
+
+    it('returns unknown-agent status when target agent is not connected', async () => {
+      mockSendRequest.mockResolvedValue(
+        makeResponse({ correlationId: 'corr-456', status: 'unknown-agent' }),
+      );
+
+      const handler = getToolHandler(server, 'send_agent_message');
+      const result = await handler({
+        fromAgent: 'agent-a',
+        toAgent: 'ghost-agent',
+        topic: 'test',
+        body: 'hi',
+      }) as { content: Array<{ type: string; text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.status).toBe('unknown-agent');
+    });
+
+    it('returns isError true when coordinator returns an error', async () => {
+      mockSendRequest.mockResolvedValue(makeResponse(null, 'missing required arguments'));
+
+      const handler = getToolHandler(server, 'send_agent_message');
+      const result = await handler({
+        fromAgent: 'a',
+        toAgent: 'b',
+        topic: 't',
+        body: 'msg',
+      }) as { isError: boolean; content: Array<{ type: string; text: string }> };
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('missing required arguments');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Lifecycle: start / stop
   // ------------------------------------------------------------------
   describe('lifecycle', () => {

@@ -13,6 +13,7 @@ import { mcpCommand } from './commands/mcp.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { usersCommand } from './commands/users.js';
 import { orgsCommand } from './commands/orgs.js';
+import { sendMessageCommand } from './commands/send-message.js';
 
 const program = new Command();
 
@@ -36,5 +37,6 @@ program.addCommand(mcpCommand);
 program.addCommand(dashboardCommand);
 program.addCommand(usersCommand);
 program.addCommand(orgsCommand);
+program.addCommand(sendMessageCommand);
 
 program.parse();

@@ -915,6 +915,23 @@ export class Coordinator {
         })));
         break;
       }
+      case 'send-message': {
+        const fromAgent = this.requireStringArg(args, 'fromAgent');
+        const toAgent = this.requireStringArg(args, 'toAgent');
+        const topic = this.requireStringArg(args, 'topic');
+        const body = this.requireStringArg(args, 'body');
+        if (!fromAgent || !toAgent || !topic || !body) {
+          this.sendError(ws, requestId, 'Missing required arguments: fromAgent, toAgent, topic, body');
+          return;
+        }
+        const correlationId = randomUUID();
+        const result = this.relayAgentMessageSync(fromAgent, toAgent, correlationId, topic, body);
+        ws.send(serializeMessage(createCliResponse({
+          requestId,
+          data: { correlationId, status: result.status },
+        })));
+        break;
+      }
       default: {
         this.sendError(ws, requestId, `Unknown command: ${command}`);
       }

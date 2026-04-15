@@ -37,6 +37,11 @@ interface TaskResultData {
   completedAt?: number;
 }
 
+interface SendMessageData {
+  correlationId: string;
+  status: 'delivered' | 'agent-offline' | 'unknown-agent';
+}
+
 // Narrow the opaque `unknown` payload.data coming from sendRequest.
 function asRecord(value: unknown): Record<string, unknown> {
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -198,6 +203,47 @@ export class CoordMcpServer {
         const task = asRecord(payload.data) as unknown as TaskResultData;
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(task) }],
+        };
+      },
+    );
+
+    // send_agent_message
+    this.mcp.registerTool(
+      'send_agent_message',
+      {
+        description: 'Send a message from one agent to another via the coordinator',
+        inputSchema: z.object({
+          fromAgent: z.string().describe('Name of the source agent'),
+          toAgent: z.string().describe('Name of the target agent'),
+          topic: z.string().describe('Message topic'),
+          body: z.string().describe('Message body'),
+        }),
+      },
+      async (args) => {
+        const ws = await this.ensureConnected();
+        const response = await sendRequest(ws, 'send-message', {
+          fromAgent: args.fromAgent,
+          toAgent: args.toAgent,
+          topic: args.topic,
+          body: args.body,
+        });
+
+        const payload = response.payload as { data: unknown; error?: string };
+        if (payload.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${payload.error}` }],
+            isError: true,
+          };
+        }
+
+        const data = asRecord(payload.data) as unknown as SendMessageData;
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ correlationId: data.correlationId, status: data.status }),
+            },
+          ],
         };
       },
     );
