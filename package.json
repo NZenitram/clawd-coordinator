@@ -1,6 +1,6 @@
 {
   "name": "@soazcloud/clawd-coordinator",
-  "version": "2026.4.15.3",
+  "version": "2026.4.15.4",
   "publishConfig": {
     "access": "public"
   },
@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "COORD_LOG_LEVEL=silent vitest run",
+    "test": "cross-env COORD_LOG_LEVEL=silent vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit"
   },
@@ -39,6 +39,7 @@
     "@types/node": "^22.0.0",
     "@types/sql.js": "^1.4.11",
     "@types/ws": "^8.5.0",
+    "cross-env": "^10.1.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
