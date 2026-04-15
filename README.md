@@ -302,7 +302,6 @@ The MCP server exposes these tools:
 - `list_agents` — List connected agents
 - `list_tasks` — List tasks with optional status filter
 - `get_task_result` — Get output from a completed task
-- `send_agent_message` — Send a message to another agent
 
 Inside Claude Code, you can now use:
 
@@ -401,12 +400,6 @@ coord run "unstable operation" --on my-agent
 ## Cross-Session Agent Communication
 
 Agents can communicate with each other directly via topic-based messaging. This enables distributed workflows like data aggregation, result fanout, and inter-agent coordination.
-
-**Via CLI (relay through coordinator):**
-```bash
-# Send from agent-a to agent-b
-coord send-message --from agent-a --to agent-b --topic "data-sync" --body '{"data": [...]}'
-```
 
 **Via REST API:**
 ```bash
