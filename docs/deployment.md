@@ -35,7 +35,24 @@ This command checks for Node.js, git, Claude Code, and authentication, then offe
 
 ## Install clawd-coordinator
 
-### From git (current)
+### From npm (recommended)
+
+**Windows (PowerShell or cmd.exe):**
+```powershell
+npm install -g clawd-coordinator
+```
+
+**macOS (Terminal or zsh):**
+```bash
+npm install -g clawd-coordinator
+```
+
+**Linux (bash):**
+```bash
+npm install -g clawd-coordinator
+```
+
+### From git (development/current main branch)
 
 ```bash
 git clone https://github.com/NZenitram/clawd-coordinator.git
@@ -44,10 +61,401 @@ npm install && npm run build
 npm link  # makes `coord` available globally
 ```
 
-### From npm (once published)
+## Manual Setup by Platform
+
+### Windows 10+ Setup
+
+#### Prerequisites
+
+```powershell
+# Check Node.js version (should be >= 18.0.0)
+node --version
+
+# Install git if needed
+winget install git
+
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate Claude Code
+claude init
+```
+
+#### Coordinator Setup
+
+```powershell
+# Initialize config
+coord init
+
+# Start coordinator on port 8080
+coord serve -p 8080
+
+# In another PowerShell window, expose via Tailscale (recommended)
+tailscale funnel 8080
+
+# Or use direct TLS
+# coord serve -p 8080 --tls-cert C:\path\to\cert.pem --tls-key C:\path\to\key.pem
+```
+
+#### Remote Agent Setup
+
+On each remote Windows machine:
+
+```powershell
+# Copy token from coordinator
+$TOKEN = "your-token-here"
+$COORDINATOR_URL = "wss://coordinator.example.ts.net"
+$AGENT_NAME = "windows-agent-1"
+
+coord agent `
+  --url $COORDINATOR_URL `
+  --token $TOKEN `
+  --name $AGENT_NAME `
+  --cwd C:\workspace
+```
+
+#### Windows Service Setup (Optional)
+
+Create `C:\coord-agent.ps1`:
+
+```powershell
+$TOKEN = "your-token"
+$COORDINATOR_URL = "wss://coordinator.example.ts.net"
+$AGENT_NAME = "windows-agent-1"
+
+while ($true) {
+    Write-Host "Starting agent..."
+    & "coord" agent `
+      --url $COORDINATOR_URL `
+      --token $TOKEN `
+      --name $AGENT_NAME `
+      --cwd C:\workspace
+    Write-Host "Agent exited, restarting in 5 seconds..."
+    Start-Sleep -Seconds 5
+}
+```
+
+Run as a scheduled task:
+```powershell
+# Create scheduled task (run as admin)
+$action = New-ScheduledTaskAction -Execute 'powershell' -Argument '-ExecutionPolicy Bypass -File C:\coord-agent.ps1'
+$trigger = New-ScheduledTaskTrigger -AtStartup
+Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "CoordAgent" -RunLevel Highest
+```
+
+Or use NSSM (Non-Sucking Service Manager) for more robust service management:
+```powershell
+# Install nssm
+choco install nssm
+
+# Install service
+nssm install CoordAgent "C:\Program Files\nodejs\node.exe" "C:\path\to\coord.js agent --url ... --token ... --name ..."
+nssm start CoordAgent
+```
+
+### macOS 12+ Setup
+
+#### Prerequisites
 
 ```bash
-npm install -g clawd-coordinator
+# Check Node.js version (should be >= 18.0.0)
+node --version
+
+# Install/update Node.js via Homebrew
+brew install node
+
+# Install git (usually pre-installed)
+brew install git
+
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate Claude Code
+claude init
+
+# Install Tailscale (optional but recommended)
+brew install tailscale
+sudo brew services start tailscale
+```
+
+#### Coordinator Setup
+
+```bash
+# Initialize config
+coord init
+
+# Start coordinator on port 8080
+coord serve -p 8080
+
+# In another terminal, expose via Tailscale (recommended)
+tailscale funnel 8080
+
+# Or use direct TLS
+# coord serve -p 8080 --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+```
+
+#### Remote Agent Setup
+
+On each remote macOS machine:
+
+```bash
+# Copy token from coordinator
+TOKEN="your-token-here"
+COORDINATOR_URL="wss://coordinator.example.ts.net"
+AGENT_NAME="macOS-agent-1"
+
+coord agent \
+  --url "$COORDINATOR_URL" \
+  --token "$TOKEN" \
+  --name "$AGENT_NAME" \
+  --cwd ~/workspace
+```
+
+#### macOS launchd Service Setup (Recommended)
+
+Create `~/Library/LaunchAgents/com.soazcloud.coord-agent.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.soazcloud.coord-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/coord</string>
+        <string>agent</string>
+        <string>--url</string>
+        <string>wss://coordinator.example.ts.net</string>
+        <string>--token</string>
+        <string>sk-your-token</string>
+        <string>--name</string>
+        <string>macOS-agent-1</string>
+        <string>--cwd</string>
+        <string>/Users/username/workspace</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/var/log/coord-agent.log</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/coord-agent.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>COORD_LOG_LEVEL</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
+```
+
+Load the service:
+```bash
+launchctl load ~/Library/LaunchAgents/com.soazcloud.coord-agent.plist
+
+# Check status
+launchctl list | grep coord-agent
+
+# View logs
+tail -f /var/log/coord-agent.log
+
+# Unload (to stop)
+launchctl unload ~/Library/LaunchAgents/com.soazcloud.coord-agent.plist
+```
+
+### Linux Setup
+
+#### Prerequisites (Ubuntu/Debian)
+
+```bash
+# Update package lists
+sudo apt update
+
+# Check Node.js version (should be >= 18.0.0)
+node --version
+
+# Install Node.js 18+ if needed
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Install git
+sudo apt install -y git
+
+# Install build tools (optional, for native npm modules)
+sudo apt install -y build-essential python3
+
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate Claude Code
+claude init
+
+# Optional: Install Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo systemctl enable --now tailscaled
+```
+
+#### Prerequisites (Fedora/CentOS/RHEL)
+
+```bash
+# Check Node.js version
+node --version
+
+# Install Node.js 18+ if needed
+curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+sudo dnf install -y nodejs
+
+# Install git
+sudo dnf install -y git
+
+# Install build tools (optional)
+sudo dnf install -y gcc g++ make python3
+
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate Claude Code
+claude init
+```
+
+#### Coordinator Setup
+
+```bash
+# Initialize config
+coord init
+
+# Start coordinator on port 8080
+coord serve -p 8080
+
+# In another terminal, expose via Tailscale (recommended)
+tailscale funnel 8080
+
+# Or use direct TLS
+# coord serve -p 8080 --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+```
+
+#### Remote Agent Setup
+
+On each remote Linux machine:
+
+```bash
+# Copy token from coordinator
+TOKEN="your-token-here"
+COORDINATOR_URL="wss://coordinator.example.ts.net"
+AGENT_NAME="linux-agent-1"
+
+coord agent \
+  --url "$COORDINATOR_URL" \
+  --token "$TOKEN" \
+  --name "$AGENT_NAME" \
+  --cwd ~/workspace
+```
+
+#### Linux systemd Service Setup (Recommended)
+
+Create `/etc/systemd/system/coord-agent.service`:
+
+```ini
+[Unit]
+Description=Clawd Coordinator Agent
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=deploy
+Environment=COORD_LOG_LEVEL=info
+ExecStart=/usr/local/bin/coord agent \
+  --url wss://coordinator.example.ts.net \
+  --token sk-your-token \
+  --name linux-agent-1 \
+  --cwd /home/deploy/workspace
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and manage the service:
+```bash
+# Reload systemd to pick up new service file
+sudo systemctl daemon-reload
+
+# Enable service to start on boot
+sudo systemctl enable coord-agent
+
+# Start the service
+sudo systemctl start coord-agent
+
+# Check status
+sudo systemctl status coord-agent
+
+# View logs in real-time
+sudo journalctl -u coord-agent -f
+
+# Stop the service
+sudo systemctl stop coord-agent
+```
+
+#### Multiple Agents on Same Machine
+
+Create multiple service files for different agents:
+
+```ini
+# /etc/systemd/system/coord-agent-dev.service
+[Unit]
+Description=Clawd Coordinator Agent (Dev)
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+ExecStart=/usr/local/bin/coord agent \
+  --url wss://coordinator.example.ts.net \
+  --token sk-dev-token \
+  --name linux-dev-agent \
+  --cwd /home/deploy/project-dev \
+  --allowed-tools "Read,Write,Edit,Bash(git:*)" \
+  --permission-mode auto
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/coord-agent-prod.service
+[Unit]
+Description=Clawd Coordinator Agent (Prod)
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+ExecStart=/usr/local/bin/coord agent \
+  --url wss://coordinator.example.ts.net \
+  --token sk-prod-token \
+  --name linux-prod-agent \
+  --cwd /home/deploy/project-prod \
+  --allowed-tools "Read,Bash(cat:*),Bash(grep:*)" \
+  --permission-mode default
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Manage both:
+```bash
+sudo systemctl enable --now coord-agent-dev coord-agent-prod
+sudo systemctl status coord-agent-dev coord-agent-prod
+sudo journalctl -u coord-agent-dev -u coord-agent-prod -f
 ```
 
 ## Setup

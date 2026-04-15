@@ -6,6 +6,7 @@ Complete reference for all `coord` CLI commands and options.
 
 | Command | Description |
 |---------|-------------|
+| `coord setup` | Check dependencies and set up machine for agent role |
 | `coord init` | Initialize coordination config and generate auth token |
 | `coord serve` | Start the coordination WebSocket server |
 | `coord agent` | Start the remote agent daemon |
@@ -31,6 +32,81 @@ Complete reference for all `coord` CLI commands and options.
 ---
 
 ## Core Commands
+
+### coord setup
+
+Check dependencies and set up a machine to run as a clawd-coordinator agent. Detects your platform (Windows, macOS, Linux) and verifies or installs required tools.
+
+**Usage:**
+```
+coord setup [options]
+```
+
+**Options:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--yes` | - | Accept all defaults and install without prompting |
+| `--url <url>` | - | Coordinator URL (saved to profile) |
+| `--token <token>` | - | Auth token (saved to profile) |
+| `--name <name>` | - | Agent name (saved to profile) |
+| `--profile <name>` | `default` | Save configuration as a named profile |
+
+**What it checks:**
+
+1. **Platform detection** — Windows, macOS, Linux, WSL
+2. **Node.js >= 18** — Required runtime
+3. **git** — Version control tool (auto-installs via brew/apt/dnf/yum/winget if missing)
+4. **Claude Code** — Installed and in PATH (auto-installs via npm if missing)
+5. **Anthropic authentication** — ANTHROPIC_API_KEY set or OAuth configured
+
+**Examples:**
+
+Check dependencies on current machine:
+```bash
+coord setup
+```
+
+Auto-yes all prompts (for scripts):
+```bash
+coord setup --yes
+```
+
+Setup and save agent configuration:
+```bash
+coord setup --url wss://coordinator.example.ts.net --token sk-abc123 --name my-agent
+```
+
+Setup with named profile for later use:
+```bash
+coord setup --url wss://prod.ts.net --token sk-prod --name prod-agent --profile production
+coord setup --url wss://staging.ts.net --token sk-staging --name staging-agent --profile staging
+```
+
+**Output example:**
+
+```
+Platform: macOS
+
+Node.js v18.12.0 — OK
+git — OK (git version 2.38.1)
+claude — OK (Version 0.1.0)
+ANTHROPIC_API_KEY — OK
+
+--- Setup Summary ---
+  [OK] Node.js >= 18
+  [OK] git
+  [OK] Claude Code
+  [OK] Anthropic auth
+
+Setup complete. Start the agent with:
+  coord agent --url wss://coordinator.example.ts.net --token <token> --name <agent-name>
+```
+
+**Return codes:**
+- `0` — All checks passed or issues were resolved
+- `1` — One or more checks failed and couldn't be auto-resolved
+
+---
 
 ### coord init
 
