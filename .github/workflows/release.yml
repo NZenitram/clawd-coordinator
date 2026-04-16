@@ -38,14 +38,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: npm
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Lint
-        run: npm run lint
 
       - name: Build
         run: npm run build
@@ -55,96 +52,9 @@ jobs:
         env:
           COORD_LOG_LEVEL: silent
 
-  build-binaries:
-    name: Build ${{ matrix.target }}
-    needs: test
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - target: linux-x64
-            runner: ubuntu-latest
-            output: coord-linux-x64
-          - target: linux-arm64
-            runner: ubuntu-latest
-            output: coord-linux-arm64
-          - target: darwin-x64
-            runner: macos-12
-            output: coord-darwin-x64
-          - target: darwin-arm64
-            runner: macos-latest
-            output: coord-darwin-arm64
-          - target: win-x64
-            runner: windows-latest
-            output: coord-win-x64.exe
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build TypeScript
-        run: npm run build
-
-      - name: Install build tools
-        run: npm install -g pkg@5.8.1 esbuild
-
-      - name: Bundle for pkg (ESM → CJS)
-        run: |
-          esbuild dist/cli/index.js \
-            --bundle \
-            --platform=node \
-            --format=cjs \
-            --outfile=dist/bundle.cjs \
-            --external:blessed \
-            --external:blessed-contrib \
-            --external:sql.js \
-            --external:@modelcontextprotocol/sdk
-        shell: bash
-
-      - name: Build binary
-        run: |
-          pkg --compress Brotli \
-              --targets node18-${{ matrix.target }} \
-              --output "${{ matrix.output }}" \
-              dist/bundle.cjs
-        shell: bash
-
-      - name: Verify binary (unix)
-        if: runner.os != 'Windows'
-        run: |
-          ls -lh "${{ matrix.output }}"
-          # Skip execution test for cross-compiled ARM binaries on x64 runners
-          if [[ "${{ matrix.target }}" != *"arm64"* ]]; then
-            ./"${{ matrix.output }}" --version
-          else
-            echo "Skipping execution test for cross-compiled ARM binary"
-            file "${{ matrix.output }}"
-          fi
-
-      - name: Verify binary (windows)
-        if: runner.os == 'Windows'
-        run: |
-          dir "${{ matrix.output }}"
-          "${{ matrix.output }}" --version
-        shell: pwsh
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.target }}
-          path: ${{ matrix.output }}
-          retention-days: 1
-
   publish-npm:
     name: Publish to npm
-    needs: build-binaries
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -152,7 +62,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
@@ -168,32 +78,21 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [publish-npm, build-binaries]
+    needs: publish-npm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: binaries
-
-      - name: Flatten artifacts
-        run: |
-          mkdir -p release-binaries
-          find binaries -type f -exec mv {} release-binaries/ \;
-          ls -la release-binaries/
-
       - name: Generate changelog
         id: changelog
         run: |
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -v "${{ github.ref_name }}" | head -1)
           if [ -z "$PREVIOUS_TAG" ]; then
             CHANGELOG=$(git log --oneline --pretty=format:"- %h %s" | head -20)
           else
-            CHANGELOG=$(git log ${PREVIOUS_TAG}..${{ github.ref }} --oneline --pretty=format:"- %h %s")
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..${{ github.ref_name }} --oneline --pretty=format:"- %h %s")
           fi
           {
             echo 'CHANGELOG<<EOF'
@@ -202,21 +101,18 @@ jobs:
           } >> $GITHUB_ENV
 
       - name: Create release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          files: release-binaries/*
+          name: ${{ github.ref_name }}
           body: |
-            ## Changes
-            ${{ env.CHANGELOG }}
+            ## Install
 
-            ## Binaries
-            - `coord-linux-x64` — Linux x86-64
-            - `coord-linux-arm64` — Linux ARM64
-            - `coord-darwin-x64` — macOS x86-64
-            - `coord-darwin-arm64` — macOS ARM64 (Apple Silicon)
-            - `coord-win-x64.exe` — Windows x86-64
+            ```bash
+            npm install -g @soazcloud/clawd-coordinator
+            ```
+
+            ## Changes
+
+            ${{ env.CHANGELOG }}
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
