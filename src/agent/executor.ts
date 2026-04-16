@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { shellOpts } from '../shared/platform.js';
+import { resolveCommand } from '../shared/platform.js';
 
 export interface RunOptions {
   prompt: string;
@@ -75,10 +75,12 @@ export class Executor {
     const taskId = options.taskId ?? `anonymous-${Date.now()}`;
 
     return new Promise<RunResult>((resolve) => {
-      const proc = spawn('claude', args, shellOpts({
+      // Use resolveCommand to find claude's actual path on Windows
+      // This avoids shell:true which mangles prompt arguments
+      const proc = spawn(resolveCommand('claude'), args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-      }));
+      });
 
       this.processes.set(taskId, proc);
       let timedOut = false;

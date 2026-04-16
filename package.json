@@ -1,6 +1,6 @@
 {
   "name": "@soazcloud/clawd-coordinator",
-  "version": "2026.4.16.2",
+  "version": "2026.4.16.3",
   "publishConfig": {
     "access": "public"
   },
