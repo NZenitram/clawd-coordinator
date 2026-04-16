@@ -267,7 +267,7 @@ export class FileReceiver {
       if (metadata.isDirectory) {
         // Ensure destination directory exists
         fs.mkdirSync(destPath, { recursive: true });
-        const extractStream = tar.extract({ cwd: destPath }) as unknown as Writable;
+        const extractStream = tar.extract({ cwd: destPath, filter: (_path, entry) => { const t = (entry as any).type; return t !== 'SymbolicLink' && t !== 'Link'; } }) as unknown as Writable;
         const session: ReceiverSession = {
           metadata,
           destPath,

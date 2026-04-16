@@ -255,7 +255,9 @@ export class AgentDaemon {
                 effectiveAddDirs = agentAddDirs;
               }
             } else if (taskAddDirs.length > 0) {
-              effectiveAddDirs = taskAddDirs;
+              // Agent has no addDirs allowlist — reject task-level dirs for security
+              logger.warn({ taskAddDirs }, 'Rejecting task-level addDirs: agent has no addDirs allowlist');
+              effectiveAddDirs = undefined;
             }
 
             // permissionMode: agent-level takes precedence; task cannot override

@@ -35,7 +35,7 @@ export const agentCommand = new Command('agent')
   }) => {
     // Build merged options: profile values as defaults, CLI flags override
     let url = options.url;
-    let token = options.token;
+    let token = options.token ?? process.env.COORD_TOKEN;
     let name = options.name;
     let cwd = options.cwd;
     let dangerouslySkipPermissions = options.dangerouslySkipPermissions;
@@ -121,6 +121,8 @@ export const agentCommand = new Command('agent')
 
     try {
       await daemon.start();
+      // Redact token from process title to prevent exposure via ps aux
+      process.title = `coord-agent:${name}`;
       console.log(`Agent "${name}" connected to ${url}`);
       console.log('Waiting for tasks. Press Ctrl+C to stop.');
     } catch (err) {

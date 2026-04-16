@@ -52,12 +52,25 @@ export class Executor {
       args.unshift('--dangerouslySkipPermissions');
     } else {
       if (options.permissionMode) {
+        if (!/^[a-zA-Z]+$/.test(options.permissionMode)) {
+          throw new Error(`Invalid permissionMode format: ${options.permissionMode}`);
+        }
         args.unshift('--permission-mode', options.permissionMode);
       }
       if (options.allowedTools?.length) {
+        for (const tool of options.allowedTools) {
+          if (!/^[a-zA-Z0-9_.:*()\-]+$/.test(tool)) {
+            throw new Error(`Invalid tool name format: ${tool}`);
+          }
+        }
         args.unshift('--allowedTools', options.allowedTools.join(','));
       }
       if (options.disallowedTools?.length) {
+        for (const tool of options.disallowedTools) {
+          if (!/^[a-zA-Z0-9_.:*()\-]+$/.test(tool)) {
+            throw new Error(`Invalid tool name format: ${tool}`);
+          }
+        }
         args.unshift('--disallowedTools', options.disallowedTools.join(','));
       }
       if (options.addDirs?.length) {

@@ -59,7 +59,7 @@ export class SqliteTaskStore implements TaskStore {
   private save(): void {
     if (this.dbPath) {
       const data = this.db.export();
-      writeFileSync(this.dbPath, Buffer.from(data));
+      writeFileSync(this.dbPath, Buffer.from(data), { mode: 0o600 });
     }
   }
 

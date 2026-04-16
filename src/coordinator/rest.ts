@@ -7,6 +7,7 @@ import type { TransferManager } from './transfer.js';
 import { validateToken } from '../shared/auth.js';
 import { metrics } from '../shared/metrics.js';
 import { type UserStore, type UserRole } from './user-store.js';
+import { checkPermission } from './rbac.js';
 import { type WebhookStore } from './webhook-store.js';
 import { resolveTemplate } from './webhook-template.js';
 import { RateLimiter } from '../shared/rate-limiter.js';
@@ -96,7 +97,17 @@ function resolveUser(req: IncomingMessage, token: string, userStore?: UserStore)
       return { userId: resolved.userId, role: resolved.role as UserRole, orgId };
     }
   }
-  return { userId: null, role: 'viewer', orgId: DEFAULT_ORG_ID };
+  // Should be unreachable — isAuthorized gates all /api/ routes
+  // Return restrictive role as defense-in-depth
+  return { userId: null, role: 'viewer' as UserRole, orgId: DEFAULT_ORG_ID };
+}
+
+function requirePermission(res: ServerResponse, role: UserRole, action: string): boolean {
+  if (!checkPermission(role, action)) {
+    sendJson(res, 403, { error: `Insufficient permissions for '${action}'` });
+    return false;
+  }
+  return true;
 }
 
 export interface AgentMessageRelayResult {
@@ -275,17 +286,22 @@ export function createRestHandler(options: {
       return;
     }
 
-    // GET /api/tasks/:id
+    // GET /api/tasks/:id (org-scoped)
     const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
     if (method === 'GET' && taskMatch) {
       const taskId = taskMatch[1];
       const task = store.get(taskId);
+      if (task && task.orgId && task.orgId !== caller.orgId) {
+        sendJson(res, 404, { error: 'Task not found' });
+        return;
+      }
       sendJson(res, 200, { task });
       return;
     }
 
-    // POST /api/dispatch
+    // POST /api/dispatch (operator+)
     if (method === 'POST' && pathname === '/api/dispatch') {
+      if (!requirePermission(res, caller.role, 'dispatch-task')) return;
       let body: unknown;
       try {
         const raw = await readBody(req);
@@ -552,8 +568,9 @@ export function createRestHandler(options: {
       return;
     }
 
-    // POST /api/message — relay agent-to-agent message
+    // POST /api/message (operator+)
     if (method === 'POST' && pathname === '/api/message') {
+      if (!requirePermission(res, caller.role, 'send-message')) return;
       if (!relayAgentMessage) {
         sendJson(res, 501, { error: 'Agent messaging not available' });
         return;
@@ -596,8 +613,9 @@ export function createRestHandler(options: {
       return;
     }
 
-    // POST /api/push — initiate a push transfer
+    // POST /api/push (operator+)
     if (method === 'POST' && pathname === '/api/push') {
+      if (!requirePermission(res, caller.role, 'push-file')) return;
       if (!transferManager) {
         sendJson(res, 501, { error: 'Transfer manager not available' });
         return;
@@ -633,8 +651,9 @@ export function createRestHandler(options: {
       return;
     }
 
-    // POST /api/pull — initiate a pull transfer
+    // POST /api/pull (operator+)
     if (method === 'POST' && pathname === '/api/pull') {
+      if (!requirePermission(res, caller.role, 'pull-file')) return;
       if (!transferManager) {
         sendJson(res, 501, { error: 'Transfer manager not available' });
         return;
@@ -678,8 +697,9 @@ export function createRestHandler(options: {
       return;
     }
 
-    // POST /api/schedules — create a schedule
+    // POST /api/schedules (operator+)
     if (method === 'POST' && pathname === '/api/schedules') {
+      if (!requirePermission(res, caller.role, 'dispatch-task')) return;
       if (!scheduleStore) { sendJson(res, 501, { error: 'Scheduler not enabled' }); return; }
       let body: unknown;
       try {
@@ -777,10 +797,10 @@ export function createRestHandler(options: {
       return;
     }
 
-    // GET /api/webhooks — list webhooks
+    // GET /api/webhooks — list webhooks (strip secrets)
     if (method === 'GET' && pathname === '/api/webhooks') {
       if (!webhookStore) { sendJson(res, 501, { error: 'Webhook support not enabled' }); return; }
-      const webhooks = webhookStore.list();
+      const webhooks = webhookStore.list().map(({ secret, ...rest }) => ({ ...rest, hasSecret: !!secret }));
       sendJson(res, 200, { webhooks });
       return;
     }

@@ -46,7 +46,6 @@ function fetchJson(url: string, token: string): Promise<unknown> {
         path: parsed.pathname + parsed.search,
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
-        rejectUnauthorized: false,
       },
       (res) => {
         const chunks: Buffer[] = [];

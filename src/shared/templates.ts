@@ -70,11 +70,11 @@ export function listTemplates(): TaskTemplate[] {
 
 export function saveTemplate(template: TaskTemplate): void {
   const dir = getTemplatesDir();
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(
     templatePath(template.name),
     JSON.stringify(template, null, 2) + '\n',
-    { encoding: 'utf-8' }
+    { encoding: 'utf-8', mode: 0o600 }
   );
 }
 

@@ -38,7 +38,7 @@ async function pullFile(
 
         if (p.isDirectory) {
           fs.mkdirSync(destPath, { recursive: true });
-          extractStream = tar.extract({ cwd: destPath }) as unknown as Writable;
+          extractStream = tar.extract({ cwd: destPath, filter: (_path: string, entry: any) => { const t = entry.type; return t !== 'SymbolicLink' && t !== 'Link'; } }) as unknown as Writable;
           extractStream.on('error', (err: Error) => cleanup(err));
         } else {
           const parentDir = path.dirname(destPath);
