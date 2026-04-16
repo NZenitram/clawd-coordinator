@@ -107,7 +107,13 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           ls -lh "${{ matrix.output }}"
-          ./"${{ matrix.output }}" --version
+          # Skip execution test for cross-compiled ARM binaries on x64 runners
+          if [[ "${{ matrix.target }}" != *"arm64"* ]]; then
+            ./"${{ matrix.output }}" --version
+          else
+            echo "Skipping execution test for cross-compiled ARM binary"
+            file "${{ matrix.output }}"
+          fi
 
       - name: Verify binary (windows)
         if: runner.os == 'Windows'
