@@ -93,7 +93,7 @@ jobs:
         run: npm run build
 
       - name: Install pkg
-        run: npm install -g pkg@5.14.4
+        run: npm install -g pkg@5.8.1
 
       - name: Build binary
         run: |
