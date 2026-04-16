@@ -52,6 +52,89 @@ jobs:
         env:
           COORD_LOG_LEVEL: silent
 
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+            output: coord-linux-x64
+          - target: linux-arm64
+            runner: ubuntu-latest
+            output: coord-linux-arm64
+          - target: darwin-x64
+            runner: macos-13
+            output: coord-darwin-x64
+          - target: darwin-arm64
+            runner: macos-latest
+            output: coord-darwin-arm64
+          - target: win-x64
+            runner: windows-latest
+            output: coord-win-x64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Install build tools
+        run: npm install -g pkg@5.8.1 esbuild
+
+      - name: Bundle for pkg (ESM to CJS)
+        run: |
+          esbuild dist/cli/index.js \
+            --bundle \
+            --platform=node \
+            --format=cjs \
+            --outfile=dist/bundle.cjs \
+            --external:blessed \
+            --external:blessed-contrib
+        shell: bash
+
+      - name: Build binary
+        run: |
+          pkg --targets node18-${{ matrix.target }} \
+              --output "${{ matrix.output }}" \
+              dist/bundle.cjs
+        shell: bash
+
+      - name: Verify binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          ls -lh "${{ matrix.output }}"
+          if [[ "${{ matrix.target }}" != *"arm64"* ]]; then
+            ./"${{ matrix.output }}" --version
+          else
+            echo "Skipping execution test for cross-compiled ARM binary"
+            file "${{ matrix.output }}"
+          fi
+
+      - name: Verify binary (windows)
+        if: runner.os == 'Windows'
+        run: |
+          dir "${{ matrix.output }}"
+          & ".\${{ matrix.output }}" --version
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ matrix.output }}
+          retention-days: 1
+
   publish-npm:
     name: Publish to npm
     needs: test
@@ -78,12 +161,23 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: publish-npm
+    needs: [publish-npm, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release-binaries
+          find binaries -type f -exec mv {} release-binaries/ \;
+          ls -la release-binaries/
 
       - name: Generate changelog
         id: changelog
@@ -107,12 +201,17 @@ jobs:
           body: |
             ## Install
 
+            **npm (requires Node.js 20+):**
             ```bash
             npm install -g @soazcloud/clawd-coordinator
             ```
 
+            **Standalone binary (no Node.js required):**
+            Download the binary for your platform from the assets below.
+
             ## Changes
 
             ${{ env.CHANGELOG }}
+          files: release-binaries/*
           draft: false
           prerelease: false

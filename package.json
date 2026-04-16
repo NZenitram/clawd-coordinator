@@ -1,6 +1,6 @@
 {
   "name": "@soazcloud/clawd-coordinator",
-  "version": "2026.4.16.1",
+  "version": "2026.4.16.2",
   "publishConfig": {
     "access": "public"
   },
@@ -27,7 +27,6 @@
     "blessed-contrib": "^4.11.0",
     "commander": "^13.0.0",
     "croner": "^10.0.1",
-    "pino": "^10.3.1",
     "prom-client": "^15.1.3",
     "sql.js": "^1.14.1",
     "tar": "^7.5.13",
