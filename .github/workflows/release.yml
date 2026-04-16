@@ -92,15 +92,28 @@ jobs:
       - name: Build TypeScript
         run: npm run build
 
-      - name: Install pkg
-        run: npm install -g pkg@5.8.1
+      - name: Install build tools
+        run: npm install -g pkg@5.8.1 esbuild
+
+      - name: Bundle for pkg (ESM → CJS)
+        run: |
+          esbuild dist/cli/index.js \
+            --bundle \
+            --platform=node \
+            --format=cjs \
+            --outfile=dist/bundle.cjs \
+            --external:blessed \
+            --external:blessed-contrib \
+            --external:sql.js \
+            --external:@modelcontextprotocol/sdk
+        shell: bash
 
       - name: Build binary
         run: |
           pkg --compress Brotli \
               --targets node18-${{ matrix.target }} \
               --output "${{ matrix.output }}" \
-              dist/cli/index.js
+              dist/bundle.cjs
         shell: bash
 
       - name: Verify binary (unix)
