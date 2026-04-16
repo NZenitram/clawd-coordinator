@@ -76,7 +76,7 @@ describe('WorktreeStrategy', () => {
     expect(execFile).toHaveBeenCalledWith(
       'git',
       ['worktree', 'add', join('/repo', '.worktrees', 'abc-123'), '-d'],
-      { cwd: baseDir },
+      expect.objectContaining({ cwd: baseDir }),
       expect.any(Function),
     );
   });
@@ -226,7 +226,7 @@ describe('WorktreeStrategy.pruneOrphans', () => {
   it('does nothing when git worktree list returns no .worktrees paths', async () => {
     // porcelain output with no worktrees under baseDir/.worktrees/
     const porcelain = [
-      'worktree /repo',
+      `worktree ${join('/repo')}`,
       'HEAD abc123',
       'branch refs/heads/main',
       '',
@@ -244,22 +244,22 @@ describe('WorktreeStrategy.pruneOrphans', () => {
     expect(execFile).toHaveBeenCalledWith(
       'git',
       ['worktree', 'list', '--porcelain'],
-      { cwd: '/repo' },
+      expect.objectContaining({ cwd: '/repo' }),
       expect.any(Function),
     );
   });
 
   it('removes stale worktrees found under .worktrees/', async () => {
     const porcelain = [
-      'worktree /repo',
+      `worktree ${join('/repo')}`,
       'HEAD abc123',
       'branch refs/heads/main',
       '',
-      'worktree /repo/.worktrees/task-orphan-1',
+      `worktree ${join('/repo', '.worktrees', 'task-orphan-1')}`,
       'HEAD def456',
       'detached',
       '',
-      'worktree /repo/.worktrees/task-orphan-2',
+      `worktree ${join('/repo', '.worktrees', 'task-orphan-2')}`,
       'HEAD ghi789',
       'detached',
       '',
@@ -282,20 +282,20 @@ describe('WorktreeStrategy.pruneOrphans', () => {
     expect(execFile).toHaveBeenCalledWith(
       'git',
       ['worktree', 'remove', '--force', join('/repo', '.worktrees', 'task-orphan-1')],
-      { cwd: '/repo' },
+      expect.objectContaining({ cwd: '/repo' }),
       expect.any(Function),
     );
     expect(execFile).toHaveBeenCalledWith(
       'git',
       ['worktree', 'remove', '--force', join('/repo', '.worktrees', 'task-orphan-2')],
-      { cwd: '/repo' },
+      expect.objectContaining({ cwd: '/repo' }),
       expect.any(Function),
     );
   });
 
   it('swallows errors on individual worktree removal failures', async () => {
     const porcelain = [
-      'worktree /repo/.worktrees/task-bad',
+      `worktree ${join('/repo', '.worktrees', 'task-bad')}`,
       'HEAD abc123',
       'detached',
       '',
