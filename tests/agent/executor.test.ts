@@ -129,7 +129,7 @@ describe('Executor', () => {
     );
   });
 
-  it('includes --dangerouslySkipPermissions when enabled', async () => {
+  it('includes --permission-mode bypassPermissions when dangerouslySkipPermissions is enabled', async () => {
     const executor = new Executor();
     await executor.run({
       prompt: 'test',
@@ -140,7 +140,7 @@ describe('Executor', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       'claude',
-      expect.arrayContaining(['--dangerouslySkipPermissions']),
+      expect.arrayContaining(['--permission-mode', 'bypassPermissions']),
       expect.any(Object)
     );
   });
@@ -161,7 +161,7 @@ describe('Executor', () => {
     );
   });
 
-  it('omits --dangerouslySkipPermissions when not set', async () => {
+  it('omits --permission-mode bypassPermissions when dangerouslySkipPermissions not set', async () => {
     const executor = new Executor();
     await executor.run({
       prompt: 'test',
@@ -170,7 +170,7 @@ describe('Executor', () => {
     });
 
     const args = (spawn as any).mock.calls[0][1] as string[];
-    expect(args).not.toContain('--dangerouslySkipPermissions');
+    expect(args).not.toContain('bypassPermissions');
   });
 
   it('passes --allowedTools when set', async () => {
@@ -238,9 +238,9 @@ describe('Executor', () => {
     });
 
     const args = (spawn as any).mock.calls[0][1] as string[];
-    expect(args).toContain('--dangerouslySkipPermissions');
+    expect(args).toContain('bypassPermissions');
     expect(args).not.toContain('--allowedTools');
-    expect(args).not.toContain('--permission-mode');
+    expect(args).not.toContain('auto');
     expect(args).not.toContain('--add-dir');
     expect(args).not.toContain('--disallowedTools');
   });
