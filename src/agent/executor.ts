@@ -49,7 +49,7 @@ export class Executor {
       args.unshift('--max-budget-usd', String(options.maxBudgetUsd));
     }
     if (options.dangerouslySkipPermissions) {
-      args.unshift('--dangerouslySkipPermissions');
+      args.unshift('--permission-mode', 'bypassPermissions');
     } else {
       if (options.permissionMode) {
         if (!/^[a-zA-Z]+$/.test(options.permissionMode)) {
